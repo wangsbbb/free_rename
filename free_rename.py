@@ -44,12 +44,17 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0"
+APP_VERSION = "1.0.1"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""  # 上传到 GitHub 后，把这里改成你的仓库地址
 TEMP_PREFIX = ".__batchrename_temp__"
 INVALID_CHARS = set('\\/:*?"<>|')
 MAX_SAFE_PATH_LEN = 240
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
 
 
 def resource_path(relative_path: str) -> str:
@@ -310,9 +315,10 @@ class RenamerWindow(QMainWindow):
         stats_row.setSpacing(16)
         self.card_total = StatCard("文件总数", "0", "#3b82f6")
         self.card_ready = StatCard("可处理", "0", "#22c55e")
+        self.card_skip = StatCard("跳过 / 未变化", "0", "#94a3b8")
         self.card_dup = StatCard("重名冲突", "0", "#ef4444")
-        self.card_err = StatCard("错误 / 跳过", "0", "#f59e0b")
-        for card in [self.card_total, self.card_ready, self.card_dup, self.card_err]:
+        self.card_err = StatCard("错误", "0", "#f59e0b")
+        for card in [self.card_total, self.card_ready, self.card_skip, self.card_dup, self.card_err]:
             stats_row.addWidget(card)
         layout.addLayout(stats_row)
 
@@ -640,11 +646,18 @@ class RenamerWindow(QMainWindow):
         self.copy_mode_radio = QRadioButton("另存为副本")
         self.rename_mode_radio.setChecked(True)
         self.continue_on_error_check = QCheckBox("遇错继续")
+        self.continue_on_error_check.setToolTip("勾选后会跳过冲突、无效项和失败项，继续处理其他可执行文件。")
         mode_row.addWidget(self.rename_mode_radio)
         mode_row.addWidget(self.copy_mode_radio)
         mode_row.addWidget(self.continue_on_error_check)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
+
+        self.preview_message_label = QLabel("")
+        self.preview_message_label.setWordWrap(True)
+        self.preview_message_label.setObjectName("PreviewMessageLabel")
+        self.preview_message_label.hide()
+        layout.addWidget(self.preview_message_label)
 
         btn_row = QHBoxLayout()
         self.refresh_btn = QPushButton("刷新预览")
@@ -801,6 +814,14 @@ class RenamerWindow(QMainWindow):
         QLabel#SubTitle, QLabel#MutedLabel {{
             color: {sub};
         }}
+        QLabel#PreviewMessageLabel {{
+            color: #dc2626;
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.16);
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-weight: 600;
+        }}
         QLabel#CardTitle {{
             font-size: 18px;
             font-weight: 700;
@@ -915,7 +936,7 @@ class RenamerWindow(QMainWindow):
             self.delete_len_edit, self.delete_prefix_count_edit, self.delete_suffix_count_edit,
             self.regex_enabled, self.regex_pattern_edit, self.regex_replace_edit,
             self.regex_ignore_case_check, self.filter_enabled, self.filter_ext_edit,
-            self.filter_mode_combo,
+            self.filter_mode_combo, self.rename_mode_radio, self.copy_mode_radio,
         ]
 
     def showEvent(self, event) -> None:
@@ -1029,6 +1050,67 @@ class RenamerWindow(QMainWindow):
         cleaned = "".join("_" if ch in INVALID_CHARS else ch for ch in stem)
         return cleaned.rstrip(" .")
 
+    def _show_preview_message(self, message: str = "") -> None:
+        if message:
+            self.preview_message_label.setText(message)
+            self.preview_message_label.show()
+        else:
+            self.preview_message_label.clear()
+            self.preview_message_label.hide()
+
+    def _validate_windows_name(self, stem: str) -> None:
+        reserved_key = stem.strip().rstrip(" .").upper()
+        if reserved_key in WINDOWS_RESERVED_NAMES:
+            raise ValueError("文件名属于 Windows 保留名称")
+
+    def _analyze_preview(self) -> Tuple[List[Tuple[FileItem, Optional[str], str, str, str, Optional[QColor]]], Dict[str, int]]:
+        analyzed: List[Tuple[FileItem, Optional[str], str, str, str, Optional[QColor]]] = []
+        counts = {"total": len(self.preview_rows), "ready": 0, "skip": 0, "dup": 0, "err": 0, "unchanged": 0}
+        target_map: Dict[str, int] = {}
+        source_paths = {str(item.path).lower() for item, _new_name, state, _ext, _folder in self.preview_rows if state == "待处理"}
+        rename_mode = self.rename_mode_radio.isChecked()
+
+        for item, new_name, _state, _ext, _folder in self.preview_rows:
+            if new_name:
+                target = str(item.folder / new_name).lower()
+                target_map[target] = target_map.get(target, 0) + 1
+
+        for item, new_name, state, ext, folder in self.preview_rows:
+            bg = None
+            display_state = state
+            target_path = item.folder / new_name if new_name else None
+
+            if new_name and target_map.get(str(target_path).lower(), 0) > 1:
+                display_state = "重名冲突"
+                counts["dup"] += 1
+                bg = QColor("#fee2e2")
+            elif state.startswith("错误"):
+                counts["err"] += 1
+                bg = QColor("#ffedd5")
+            elif state == "跳过":
+                counts["skip"] += 1
+                bg = QColor("#f3f4f6")
+            elif state == "未变化":
+                counts["skip"] += 1
+                counts["unchanged"] += 1
+                bg = QColor("#eff6ff")
+            elif new_name and target_path.exists():
+                target_key = str(target_path).lower()
+                source_key = str(item.path).lower()
+                can_reuse_existing = rename_mode and target_key in source_paths
+                same_file = target_key == source_key
+                if not same_file and not can_reuse_existing:
+                    display_state = "错误：目标文件已存在"
+                    counts["err"] += 1
+                    bg = QColor("#ffedd5")
+                else:
+                    counts["ready"] += 1
+            else:
+                counts["ready"] += 1
+
+            analyzed.append((item, new_name, display_state, ext, folder, bg))
+        return analyzed, counts
+
     def _apply_insert(self, stem: str) -> str:
         if not self.insert_enabled.isChecked():
             return stem
@@ -1102,6 +1184,7 @@ class RenamerWindow(QMainWindow):
         stem = self._sanitize_name(stem)
         if not stem:
             raise ValueError("生成的新文件名为空")
+        self._validate_windows_name(stem)
         final_name = stem + (item.ext if self.keep_ext_check.isChecked() else "")
         if len(str(item.folder / final_name)) >= MAX_SAFE_PATH_LEN:
             raise ValueError("目标路径过长")
@@ -1119,8 +1202,11 @@ class RenamerWindow(QMainWindow):
             try:
                 seq_num = start_num + seq_index * step
                 new_name = self._build_final_name(item, seq_num)
-                preview.append((item, new_name, "待处理", item.ext or "-", str(item.folder)))
+                state = "未变化" if new_name == item.name else "待处理"
+                preview.append((item, new_name, state, item.ext or "-", str(item.folder)))
                 seq_index += 1
+            except re.error as exc:
+                preview.append((item, None, f"错误：正则表达式无效（{exc}）", item.ext or "-", str(item.folder)))
             except Exception as exc:
                 preview.append((item, None, f"错误：{exc}", item.ext or "-", str(item.folder)))
         return preview
@@ -1129,9 +1215,11 @@ class RenamerWindow(QMainWindow):
         self.file_count_label.setText(f"{len(self.files)} 个文件")
         try:
             self.preview_rows = self.generate_preview() if self.files else []
+            self._show_preview_message("")
         except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, str(exc))
             self.preview_rows = []
+            self._show_preview_message(f"预览配置有误：{exc}")
+            self.status.showMessage(f"预览配置有误：{exc}")
         self._render_preview()
         self._update_home_stats()
         self._refresh_history_panel()
@@ -1143,122 +1231,133 @@ class RenamerWindow(QMainWindow):
             self.home_info.setPlainText("还没有导入文件。\n\n你可以从左侧工作区进入‘批量重命名’，也可以在首页快速添加文件。")
             return
 
-        target_map: Dict[str, int] = {}
-        for item, new_name, _state, _ext, _folder in self.preview_rows:
-            if new_name:
-                target = str(item.folder / new_name).lower()
-                target_map[target] = target_map.get(target, 0) + 1
-
-        dup_count = err_count = skip_count = 0
-        self.table.setRowCount(len(self.preview_rows))
-        for row, (item, new_name, state, ext, folder) in enumerate(self.preview_rows):
+        analyzed, counts = self._analyze_preview()
+        self.table.setRowCount(len(analyzed))
+        for row, (item, new_name, state, ext, folder, bg) in enumerate(analyzed):
             show_name = new_name or "-"
-            bg = None
-            if new_name and target_map.get(str(item.folder / new_name).lower(), 0) > 1:
-                state = "重名冲突"
-                dup_count += 1
-                bg = QColor("#fee2e2")
-            elif state.startswith("错误"):
-                err_count += 1
-                bg = QColor("#ffedd5")
-            elif state == "跳过":
-                skip_count += 1
-                bg = QColor("#f3f4f6")
-
             values = [item.name, show_name, state, ext, folder]
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 if bg:
                     cell.setBackground(bg)
                 self.table.setItem(row, col, cell)
-        self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
 
-        ok_count = len(self.preview_rows) - dup_count - err_count - skip_count
-        self.status.showMessage(f"共 {len(self.preview_rows)} 个文件，可处理 {ok_count} 个，跳过 {skip_count} 个，冲突 {dup_count} 个，错误 {err_count} 个")
+        self.status.showMessage(
+            f"共 {counts['total']} 个文件，可处理 {counts['ready']} 个，跳过 {counts['skip']} 个，冲突 {counts['dup']} 个，错误 {counts['err']} 个"
+        )
         self.home_info.setPlainText(
-            f"当前文件总数：{len(self.preview_rows)}\n"
-            f"可处理：{ok_count}\n跳过：{skip_count}\n重名冲突：{dup_count}\n错误：{err_count}\n\n"
+            f"当前文件总数：{counts['total']}\n"
+            f"可处理：{counts['ready']}\n跳过：{counts['skip']}（其中未变化 {counts['unchanged']}）\n重名冲突：{counts['dup']}\n错误：{counts['err']}\n\n"
             "界面已经切换为 PySide6 仪表盘风格。"
         )
 
     def _update_home_stats(self) -> None:
-        total = len(self.preview_rows)
-        ready = dup = err = 0
-        target_map: Dict[str, int] = {}
-        for item, new_name, _state, _ext, _folder in self.preview_rows:
-            if new_name:
-                target = str(item.folder / new_name).lower()
-                target_map[target] = target_map.get(target, 0) + 1
-        for item, new_name, state, *_ in self.preview_rows:
-            if new_name and target_map.get(str(item.folder / new_name).lower(), 0) > 1:
-                dup += 1
-            elif state.startswith("错误") or state == "跳过":
-                err += 1
-            else:
-                ready += 1
-        self.card_total.set_value(str(total))
-        self.card_ready.set_value(str(ready))
-        self.card_dup.set_value(str(dup))
-        self.card_err.set_value(str(err))
+        _rows, counts = self._analyze_preview()
+        self.card_total.set_value(str(counts["total"]))
+        self.card_ready.set_value(str(counts["ready"]))
+        self.card_skip.set_value(str(counts["skip"]))
+        self.card_dup.set_value(str(counts["dup"]))
+        self.card_err.set_value(str(counts["err"]))
 
     def _refresh_history_panel(self) -> None:
         self.history_list.clear()
         for text in self.history[-100:][::-1]:
             self.history_list.addItem(text)
 
-    def validate_execute(self) -> List[Tuple[FileItem, str]]:
+    def validate_execute(self) -> Tuple[List[Tuple[FileItem, str]], Dict[str, int]]:
         if not self.preview_rows:
             raise ValueError("没有可处理的文件")
+        analyzed, counts = self._analyze_preview()
         todo: List[Tuple[FileItem, str]] = []
-        seen: set[str] = set()
-        for item, new_name, state, _ext, _folder in self.preview_rows:
-            if state == "跳过":
-                continue
-            if not new_name:
-                raise ValueError(f"文件 {item.name} 无法生成新文件名")
-            target = str(item.folder / new_name).lower()
-            if target in seen:
-                raise ValueError(f"存在重名冲突：{new_name}")
-            seen.add(target)
-            todo.append((item, new_name))
+        hard_blockers: List[str] = []
+
+        for item, new_name, state, _ext, _folder, _bg in analyzed:
+            if state == "待处理":
+                todo.append((item, new_name or ""))
+            elif state.startswith("错误") or state == "重名冲突":
+                hard_blockers.append(f"{item.name} -> {state}")
+
+        if hard_blockers and not self.continue_on_error_check.isChecked():
+            preview = "\n".join(hard_blockers[:8])
+            more = "" if len(hard_blockers) <= 8 else f"\n... 还有 {len(hard_blockers) - 8} 项"
+            raise ValueError("当前存在冲突或错误，请先处理后再执行，或勾选‘遇错继续’。\n\n" + preview + more)
         if not todo:
+            if counts["unchanged"] > 0 and counts["ready"] == 0:
+                raise ValueError("没有需要处理的文件，当前项均为未变化或被跳过。")
             raise ValueError("没有可执行的文件")
-        return todo
+        return todo, counts
 
     def execute(self) -> None:
         try:
             self.refresh_preview()
-            tasks = self.validate_execute()
+            tasks, counts = self.validate_execute()
         except ValueError as exc:
             QMessageBox.critical(self, APP_TITLE, str(exc))
             return
+
         mode_text = "另存为副本" if self.copy_mode_radio.isChecked() else "覆盖原文件"
-        if QMessageBox.question(self, APP_TITLE, f"确认开始处理吗？\n\n文件数量：{len(tasks)}\n执行方式：{mode_text}") != QMessageBox.Yes:
+        continue_mode = self.continue_on_error_check.isChecked()
+        confirm_text = (
+            f"确认开始处理吗？\n\n"
+            f"文件数量：{len(tasks)}\n"
+            f"执行方式：{mode_text}\n"
+            f"遇错继续：{'是' if continue_mode else '否'}\n\n"
+            f"当前预览：可处理 {counts['ready']}，跳过 {counts['skip']}，冲突 {counts['dup']}，错误 {counts['err']}"
+        )
+        if QMessageBox.question(self, APP_TITLE, confirm_text) != QMessageBox.Yes:
             return
+
         try:
             if self.copy_mode_radio.isChecked():
-                self._execute_copy(tasks)
+                success_count, runtime_failures = self._execute_copy(tasks, continue_mode)
             else:
-                self._execute_rename(tasks)
+                success_count, runtime_failures = self._execute_rename(tasks, continue_mode)
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"处理失败：{exc}")
             self.history.append(f"执行失败：{exc}")
             self.refresh_preview()
             return
-        self.history.append(f"执行完成：{len(tasks)} 个文件，模式={mode_text}")
-        self.refresh_preview()
-        QMessageBox.information(self, APP_TITLE, f"处理完成，共 {len(tasks)} 个文件。")
 
-    def _execute_copy(self, tasks: List[Tuple[FileItem, str]]) -> None:
+        summary = (
+            f"处理完成：成功 {success_count} 个，跳过 {counts['skip']} 个（其中未变化 {counts['unchanged']}），"
+            f"冲突 {counts['dup']} 个，错误 {counts['err']} 个，运行时失败 {len(runtime_failures)} 个，模式={mode_text}"
+        )
+        self.history.append(summary)
+        for failure in runtime_failures[:20]:
+            self.history.append(f"失败：{failure}")
+        self.refresh_preview()
+
+        detail_lines = [
+            f"成功：{success_count}",
+            f"跳过：{counts['skip']}（其中未变化 {counts['unchanged']}）",
+            f"重名冲突：{counts['dup']}",
+            f"预览错误：{counts['err']}",
+            f"运行时失败：{len(runtime_failures)}",
+        ]
+        if runtime_failures:
+            detail_lines.append("")
+            detail_lines.append("部分失败示例：")
+            detail_lines.extend(runtime_failures[:5])
+        QMessageBox.information(self, APP_TITLE, "处理完成。\n\n" + "\n".join(detail_lines))
+
+    def _execute_copy(self, tasks: List[Tuple[FileItem, str]], continue_on_error: bool) -> Tuple[int, List[str]]:
+        success = 0
+        failures: List[str] = []
         for item, new_name in tasks:
             target = item.folder / new_name
-            if target.exists():
-                raise FileExistsError(f"目标文件已存在：{target}")
-        for item, new_name in tasks:
-            shutil.copy2(item.path, item.folder / new_name)
+            try:
+                if target.exists():
+                    raise FileExistsError(f"目标文件已存在：{target}")
+                shutil.copy2(item.path, target)
+                success += 1
+            except Exception as exc:
+                if not continue_on_error:
+                    raise
+                failures.append(f"{item.name} -> {new_name}：{exc}")
+        return success, failures
 
-    def _execute_rename(self, tasks: List[Tuple[FileItem, str]]) -> None:
+    def _execute_rename(self, tasks: List[Tuple[FileItem, str]], continue_on_error: bool) -> Tuple[int, List[str]]:
         temp_pairs: List[Tuple[FileItem, Path, str]] = []
         for idx, (item, new_name) in enumerate(tasks):
             temp_path = item.folder / f"{TEMP_PREFIX}{idx}__{item.name}"
@@ -1275,6 +1374,7 @@ class RenamerWindow(QMainWindow):
                 os.rename(temp_path, final_path)
                 updated[str(item.path).lower()] = final_path
             self.files = [FileItem(updated.get(str(item.path).lower(), item.path)) for item in self.files]
+            return len(tasks), []
         except Exception:
             for item, temp_path, new_name in temp_pairs:
                 original = item.path

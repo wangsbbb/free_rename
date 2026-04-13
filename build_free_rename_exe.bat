@@ -7,11 +7,11 @@ set "ROOT=%~dp0"
 cd /d "%ROOT%"
 set "LOG=%ROOT%build_free_rename_log.txt"
 
-echo [INFO] free_rename v1.0 onefile build > "%LOG%"
+echo [INFO] free_rename v1.0.1 onefile build > "%LOG%"
 echo [INFO] Working dir: %ROOT%>> "%LOG%"
 
 echo.
-echo === free_rename v1.0 onefile build ===
+echo === free_rename v1.0.1 onefile build ===
 echo.
 
 if not exist "%ROOT%free_rename.py" (

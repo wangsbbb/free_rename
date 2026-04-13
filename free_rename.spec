@@ -1,17 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-from pathlib import Path
-
-project_dir = Path(__file__).resolve().parent
-script_file = project_dir / 'free_rename.py'
-assets_dir = project_dir / 'assets'
-icon_file = assets_dir / 'icons' / 'app_icon_final.ico'
 
 
 a = Analysis(
-    [str(script_file)],
-    pathex=[str(project_dir)],
+    ['C:\\Users\\sexer\\Desktop\\豆瓣工具\\批量重命名\\free_rename_v1.0_github\\free_rename.py'],
+    pathex=[],
     binaries=[],
-    datas=[(str(assets_dir), 'assets')],
+    datas=[('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -41,5 +35,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(icon_file) if icon_file.exists() else None,
+    version='C:\\Users\\sexer\\Desktop\\豆瓣工具\\批量重命名\\free_rename_v1.0_github\\version_info.txt',
+    icon=['C:\\Users\\sexer\\Desktop\\豆瓣工具\\批量重命名\\free_rename_v1.0_github\\assets\\icons\\app_icon_final.ico'],
 )
