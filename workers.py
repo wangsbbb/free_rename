@@ -9,6 +9,7 @@ from rule_engine import FileItem, OperationCancelled, RuleConfig, RuleEngine
 
 
 class PreviewWorker(QObject):
+    progress = Signal(int, int, str)
     finished = Signal(object)
     failed = Signal(str)
 
@@ -26,7 +27,12 @@ class PreviewWorker(QObject):
 
     def run(self) -> None:
         try:
-            rows = RuleEngine.generate_preview(self.files, self.config, should_cancel=self.is_cancel_requested)
+            rows = RuleEngine.generate_preview(
+                self.files,
+                self.config,
+                should_cancel=self.is_cancel_requested,
+                progress=self.progress.emit,
+            )
             self.finished.emit({'rows': rows, 'cancelled': False})
         except OperationCancelled:
             self.finished.emit({'rows': None, 'cancelled': True})

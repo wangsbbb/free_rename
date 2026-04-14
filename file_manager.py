@@ -87,7 +87,6 @@ class FileManager:
         }
 
     @staticmethod
-    @staticmethod
     def _run_rename_strict(
         tasks: list[tuple[FileItem, str]],
         progress: Optional[Callable[[int, int, str], None]],

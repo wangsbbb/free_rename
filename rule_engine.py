@@ -88,6 +88,8 @@ class PreviewSummary:
 
 
 class RuleEngine:
+    PREVIEW_PROGRESS_INTERVAL = 200
+
     @staticmethod
     def parse_exts(raw: str) -> set[str]:
         exts: set[str] = set()
@@ -220,26 +222,30 @@ class RuleEngine:
         files: list[FileItem],
         config: RuleConfig,
         should_cancel: Optional[Callable[[], bool]] = None,
+        progress: Optional[Callable[[int, int, str], None]] = None,
     ) -> list[PreviewRow]:
         regex_rule = RuleEngine.get_compiled_regex(config)
         rows: list[PreviewRow] = []
         seq_index = 0
-        for item in files:
+        total = len(files)
+        for index, item in enumerate(files, start=1):
             if should_cancel is not None and should_cancel():
                 raise OperationCancelled('预览已取消')
             if not RuleEngine.passes_filter(item, config):
                 rows.append(PreviewRow(item=item, new_name=None, state='跳过', ext=item.ext or '-', folder=str(item.folder)))
-                continue
-            try:
-                seq_num = config.start_num + seq_index * config.step
-                new_name = RuleEngine.build_final_name(item, seq_num, config, regex_rule)
-                state = '待处理'
-                if new_name == item.name:
-                    state = '跳过'
-                rows.append(PreviewRow(item=item, new_name=new_name, state=state, ext=item.ext or '-', folder=str(item.folder)))
-                seq_index += 1
-            except Exception as exc:
-                rows.append(PreviewRow(item=item, new_name=None, state=f'错误：{exc}', ext=item.ext or '-', folder=str(item.folder)))
+            else:
+                try:
+                    seq_num = config.start_num + seq_index * config.step
+                    new_name = RuleEngine.build_final_name(item, seq_num, config, regex_rule)
+                    state = '待处理'
+                    if new_name == item.name:
+                        state = '跳过'
+                    rows.append(PreviewRow(item=item, new_name=new_name, state=state, ext=item.ext or '-', folder=str(item.folder)))
+                    seq_index += 1
+                except Exception as exc:
+                    rows.append(PreviewRow(item=item, new_name=None, state=f'错误：{exc}', ext=item.ext or '-', folder=str(item.folder)))
+            if progress is not None and (index == 1 or index == total or index % RuleEngine.PREVIEW_PROGRESS_INTERVAL == 0):
+                progress(index, total, f'正在计算预览：{item.name}')
         return rows
 
     @staticmethod

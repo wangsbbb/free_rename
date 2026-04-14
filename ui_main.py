@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -45,7 +46,7 @@ from rule_engine import FileItem, PreviewRow, PreviewSummary, RuleConfig, RuleEn
 from workers import PreviewWorker, RenameWorker, ScanWorker
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350
@@ -465,6 +466,7 @@ class RenamerWindow(QMainWindow):
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.history_file = self._history_file_path()
         self.preview_model = PreviewTableModel(self)
+        self._table_columns_initialized = False
         self.last_dir = self.settings.value("paths/last_dir", str(Path.home()), type=str) or str(Path.home())
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
@@ -524,8 +526,10 @@ class RenamerWindow(QMainWindow):
     def _load_history(self) -> None:
         try:
             if self.history_file.exists():
-                lines = [line for line in self.history_file.read_text(encoding='utf-8').splitlines() if line.strip()]
-                self.history = lines[-500:]
+                with self.history_file.open('r', encoding='utf-8', errors='ignore') as f:
+                    self.history = [line.rstrip('\n') for line in deque((line for line in f if line.strip()), maxlen=500)]
+            else:
+                self.history = []
         except Exception:
             self.history = []
         self._refresh_history_panel()
@@ -591,6 +595,22 @@ class RenamerWindow(QMainWindow):
         self.filter_ext_edit.setText(self.settings.value("rules/filter_ext_text", "", type=str) or "")
         self.filter_mode_combo.setCurrentText(self.settings.value("rules/filter_mode", "仅处理这些扩展名", type=str) or "仅处理这些扩展名")
 
+        current_page = self.settings.value("ui/current_page", 0, type=int)
+        current_tab = self.settings.value("ui/current_tab", 0, type=int)
+        if 0 <= current_page < self.stack.count():
+            self._switch_page(current_page)
+        if 0 <= current_tab < self.tabs.count():
+            self.tabs.setCurrentIndex(current_tab)
+
+        splitter_state = self.settings.value("ui/main_splitter_state")
+        if splitter_state:
+            self.main_splitter.restoreState(splitter_state)
+
+        header_state = self.settings.value("ui/table_header_state")
+        if header_state:
+            self.table.horizontalHeader().restoreState(header_state)
+            self._table_columns_initialized = True
+
     def _save_ui_settings(self) -> None:
         self.settings.setValue("ui/theme", self.current_theme)
         self.settings.setValue("ui/geometry", self.saveGeometry())
@@ -631,6 +651,11 @@ class RenamerWindow(QMainWindow):
         self.settings.setValue("rules/filter_enabled", self.filter_enabled.isChecked())
         self.settings.setValue("rules/filter_ext_text", self.filter_ext_edit.text())
         self.settings.setValue("rules/filter_mode", self.filter_mode_combo.currentText())
+
+        self.settings.setValue("ui/current_page", self.stack.currentIndex())
+        self.settings.setValue("ui/current_tab", self.tabs.currentIndex())
+        self.settings.setValue("ui/main_splitter_state", self.main_splitter.saveState())
+        self.settings.setValue("ui/table_header_state", self.table.horizontalHeader().saveState())
 
     def closeEvent(self, event) -> None:
         if self._execute_thread is not None or self._scan_thread is not None or self._preview_thread is not None:
@@ -816,6 +841,7 @@ class RenamerWindow(QMainWindow):
         page, layout = self._make_page_shell("free_rename", "左侧文件清单 + 右侧规则中心，整体风格统一。")
 
         splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = splitter
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(8)
         layout.addWidget(splitter, 1)
@@ -917,13 +943,74 @@ class RenamerWindow(QMainWindow):
         card.setObjectName("Card")
         box = QVBoxLayout(card)
         box.setContentsMargins(20, 18, 20, 18)
+        box.setSpacing(12)
+
+        top = QHBoxLayout()
         title = QLabel("最近操作")
         title.setObjectName("CardTitle")
+        self.history_meta_label = QLabel("0 条记录")
+        self.history_meta_label.setObjectName("MutedLabel")
+        top.addWidget(title)
+        top.addStretch(1)
+        top.addWidget(self.history_meta_label)
+
+        tools = QHBoxLayout()
+        self.history_search_edit = QLineEdit()
+        self.history_search_edit.setPlaceholderText("搜索历史记录…")
+        self.history_search_edit.textChanged.connect(self._refresh_history_panel)
+        self.history_open_btn = QPushButton("打开日志位置")
+        self.history_open_btn.clicked.connect(self._open_history_location)
+        self.history_export_btn = QPushButton("导出历史")
+        self.history_export_btn.clicked.connect(self._export_history)
+        self.history_clear_btn = QPushButton("清空历史")
+        self.history_clear_btn.clicked.connect(self._clear_history)
+        tools.addWidget(self.history_search_edit, 1)
+        tools.addWidget(self.history_open_btn)
+        tools.addWidget(self.history_export_btn)
+        tools.addWidget(self.history_clear_btn)
+
         self.history_list = QListWidget()
-        box.addWidget(title)
+        self.history_list.setAlternatingRowColors(True)
+        box.addLayout(top)
+        box.addLayout(tools)
         box.addWidget(self.history_list)
         layout.addWidget(card, 1)
         return page
+
+    def _open_history_location(self) -> None:
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.history_file.parent)))
+
+    def _export_history(self) -> None:
+        default_path = str(Path(self._dialog_start_dir()) / 'free_rename_history.txt')
+        save_path, _ = QFileDialog.getSaveFileName(self, '导出历史记录', default_path, 'Text Files (*.txt)')
+        if not save_path:
+            return
+        self._remember_path(save_path)
+        try:
+            Path(save_path).write_text('\n'.join(self.history), encoding='utf-8')
+            QMessageBox.information(self, APP_TITLE, '历史记录导出完成。')
+            self._add_history(f'导出历史：{save_path}')
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f'导出历史失败：{exc}')
+
+    def _clear_history(self) -> None:
+        if not self.history:
+            QMessageBox.information(self, APP_TITLE, '当前没有可清空的历史记录。')
+            return
+        if QMessageBox.question(self, APP_TITLE, '确认清空本地历史记录吗？') != QMessageBox.Yes:
+            return
+        self.history.clear()
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            self.history_file.write_text('', encoding='utf-8')
+        except Exception:
+            pass
+        self._refresh_history_panel()
+        self.status.showMessage('历史记录已清空')
 
     def _build_settings_page(self) -> QWidget:
         page, layout = self._make_page_shell("设置", "主题、显示与基础偏好。")
@@ -1309,6 +1396,10 @@ class RenamerWindow(QMainWindow):
             return
 
         self._set_preview_busy(True)
+        total = max(len(self.files), 1)
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat(f"0/{total}")
         self.progress_label.setText("正在后台计算预览…")
         self.status.showMessage("正在后台计算预览…")
 
@@ -1316,6 +1407,7 @@ class RenamerWindow(QMainWindow):
         self._preview_worker = PreviewWorker(self.files, config)
         self._preview_worker.moveToThread(self._preview_thread)
         self._preview_thread.started.connect(self._preview_worker.run)
+        self._preview_worker.progress.connect(self._on_preview_progress)
         self._preview_worker.finished.connect(self._on_preview_finished)
         self._preview_worker.finished.connect(self._preview_thread.quit)
         self._preview_worker.failed.connect(lambda text: self._on_preview_failed(text, show_errors))
@@ -1359,12 +1451,23 @@ class RenamerWindow(QMainWindow):
         _ = busy
         self._update_interaction_state()
 
+    def _on_preview_progress(self, current: int, total: int, message: str) -> None:
+        total = max(total, 1)
+        shown = min(current, total)
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(shown)
+        self.progress_bar.setFormat(f"{shown}/{total}")
+        self.progress_label.setText(message)
+        self.status.showMessage(message)
+
     def _on_preview_finished(self, result: object) -> None:
         data = result if isinstance(result, dict) else {}
         if data.get('cancelled'):
             self._preview_dirty = True
             self.progress_label.setText('预览已取消')
             self.status.showMessage('预览已取消')
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat('')
             self._set_preview_busy(False)
             return
         rows = data.get('rows', []) if isinstance(data, dict) else []
@@ -1375,6 +1478,8 @@ class RenamerWindow(QMainWindow):
         self._render_preview()
         self._update_home_stats()
         self._refresh_history_panel()
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        self.progress_bar.setFormat(f"{self.progress_bar.maximum()}/{self.progress_bar.maximum()}")
         self.progress_label.setText("预览已更新")
         self.status.showMessage(
             f"共 {self.preview_summary.total} 个文件，可处理 {self.preview_summary.ready} 个，跳过 {self.preview_summary.skip} 个，"
@@ -1385,6 +1490,8 @@ class RenamerWindow(QMainWindow):
     def _on_preview_failed(self, error_text: str, show_errors: bool) -> None:
         self._preview_dirty = True
         self._set_preview_busy(False)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("")
         self.progress_label.setText(f"预览参数无效：{error_text}")
         self.status.showMessage(f"预览未更新：{error_text}")
         if show_errors:
@@ -1558,8 +1665,7 @@ class RenamerWindow(QMainWindow):
             self._update_interaction_state()
             return
 
-        self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self._apply_preview_column_layout()
 
         self.home_info.setPlainText(
             f"当前文件总数：{self.preview_summary.total}\n"
@@ -1567,9 +1673,28 @@ class RenamerWindow(QMainWindow):
             f"跳过：{self.preview_summary.skip}\n"
             f"重名冲突：{self.preview_summary.duplicate}\n"
             f"错误：{self.preview_summary.error}\n\n"
-            "当前版本已改为 QTableView + Model 预览模式，并将文件夹扫描移入后台线程。"
+            "当前版本进一步优化了预览进度反馈、历史页检索和大列表列宽布局。"
         )
         self._update_interaction_state()
+
+
+    def _apply_preview_column_layout(self) -> None:
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        if self.preview_summary.total <= 200:
+            self.table.resizeColumnsToContents()
+        elif not self._table_columns_initialized:
+            self.table.setColumnWidth(0, 280)
+            self.table.setColumnWidth(1, 300)
+            self.table.setColumnWidth(2, 140)
+            self.table.setColumnWidth(3, 90)
+            self.table.setColumnWidth(4, 420)
+            self._table_columns_initialized = True
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
 
     def _update_home_stats(self) -> None:
         self.card_total.set_value(str(self.preview_summary.total))
@@ -1579,8 +1704,20 @@ class RenamerWindow(QMainWindow):
 
     def _refresh_history_panel(self) -> None:
         self.history_list.clear()
-        for text in self.history[-100:][::-1]:
-            self.history_list.addItem(text)
+        query = self.history_search_edit.text().strip().lower() if hasattr(self, 'history_search_edit') else ''
+        visible: list[str] = []
+        for text in self.history[::-1]:
+            if query and query not in text.lower():
+                continue
+            visible.append(text)
+            if len(visible) >= 200:
+                break
+        self.history_list.addItems(visible)
+        total = len(self.history)
+        shown = len(visible)
+        if hasattr(self, 'history_meta_label'):
+            suffix = f'，匹配 {shown} 条' if query else f'，显示最近 {shown} 条'
+            self.history_meta_label.setText(f'{total} 条记录{suffix}')
 
     def _build_tasks_from_current_rules(self) -> tuple[list[tuple[FileItem, str]], list[str]]:
         if self._preview_thread is not None or self._preview_dirty:
@@ -1709,6 +1846,11 @@ class RenamerWindow(QMainWindow):
             self._add_history(f"执行完成：{completed} 个文件，模式={mode_text}")
             self.progress_label.setText(f"处理完成：{completed} 个文件")
             self.status.showMessage(f"处理完成，共 {completed} 个文件。")
+
+        if isinstance(failure_messages, list) and failure_messages:
+            for detail in failure_messages[:50]:
+                self._add_history(f"失败明细：{detail}", refresh=False)
+            self._refresh_history_panel()
 
         self.refresh_preview(show_errors=False)
 
