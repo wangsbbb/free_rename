@@ -8,9 +8,9 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
-from PySide6.QtCore import Qt, Signal, QSize, QUrl
+from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, QObject, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSplitter,
     QStackedWidget,
+    QProgressBar,
     QStatusBar,
     QStyle,
     QTableWidget,
@@ -51,6 +52,16 @@ PROJECT_URL = ""  # 上传到 GitHub 后，把这里改成你的仓库地址
 TEMP_PREFIX = ".__batchrename_temp__"
 INVALID_CHARS = set('\\/:*?"<>|')
 MAX_SAFE_PATH_LEN = 240
+PREVIEW_DEBOUNCE_MS = 350
+SETTINGS_ORG = "free_rename"
+SETTINGS_APP = "free_rename"
+
+
+def safe_move_path(source: Path, target: Path) -> None:
+    try:
+        os.rename(source, target)
+    except OSError:
+        shutil.move(str(source), str(target))
 
 
 def resource_path(relative_path: str) -> str:
@@ -58,7 +69,7 @@ def resource_path(relative_path: str) -> str:
     return str(Path(base_path) / relative_path)
 
 
-def find_asset(candidates: List[str]) -> Optional[Path]:
+def find_asset(candidates: list[str]) -> Optional[Path]:
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     search_roots = [
         base_path / "assets" / "icons",
@@ -114,7 +125,7 @@ class DropTable(QTableWidget):
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        paths: List[str] = []
+        paths: list[str] = []
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 local = url.toLocalFile()
@@ -171,22 +182,107 @@ class StatCard(QFrame):
         self.value_label.setText(value)
 
 
+class RenameWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, tasks: list[tuple[FileItem, str]], mode: str) -> None:
+        super().__init__()
+        self.tasks = tasks
+        self.mode = mode
+
+    def run(self) -> None:
+        try:
+            if self.mode == "copy":
+                result = self._run_copy()
+            else:
+                result = self._run_rename()
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def _run_copy(self) -> dict[str, object]:
+        total = len(self.tasks)
+        for item, new_name in self.tasks:
+            target = item.folder / new_name
+            if target.exists():
+                raise FileExistsError(f"目标文件已存在：{target}")
+        for index, (item, new_name) in enumerate(self.tasks, start=1):
+            shutil.copy2(item.path, item.folder / new_name)
+            self.progress.emit(index, total, f"正在复制：{item.name}")
+        return {
+            "mode": "copy",
+            "completed": total,
+            "updated": {},
+        }
+
+    def _run_rename(self) -> dict[str, object]:
+        total = max(len(self.tasks) * 2, 1)
+        current = 0
+        temp_pairs: list[tuple[FileItem, Path, str]] = []
+        for idx, (item, new_name) in enumerate(self.tasks):
+            temp_path = item.folder / f"{TEMP_PREFIX}{idx}__{item.name}"
+            if temp_path.exists():
+                raise FileExistsError(f"临时文件名已存在：{temp_path}")
+            safe_move_path(item.path, temp_path)
+            temp_pairs.append((item, temp_path, new_name))
+            current += 1
+            self.progress.emit(current, total, f"准备重命名：{item.name}")
+        try:
+            updated: dict[str, Path] = {}
+            for item, temp_path, new_name in temp_pairs:
+                final_path = item.folder / new_name
+                if final_path.exists():
+                    raise FileExistsError(f"目标文件已存在：{final_path}")
+                safe_move_path(temp_path, final_path)
+                updated[str(item.path).lower()] = final_path
+                current += 1
+                self.progress.emit(current, total, f"正在写入：{final_path.name}")
+            return {
+                "mode": "rename",
+                "completed": len(self.tasks),
+                "updated": {key: str(value) for key, value in updated.items()},
+            }
+        except Exception:
+            for item, temp_path, new_name in temp_pairs:
+                original = item.path
+                final_path = item.folder / new_name
+                try:
+                    if temp_path.exists():
+                        safe_move_path(temp_path, original)
+                    elif final_path.exists() and final_path != original:
+                        safe_move_path(final_path, original)
+                except Exception:
+                    pass
+            raise
+
+
 class RenamerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.files: List[FileItem] = []
-        self.preview_rows: List[Tuple[FileItem, Optional[str], str, str, str]] = []
-        self.history: List[str] = []
+        self.files: list[FileItem] = []
+        self.preview_rows: list[tuple[FileItem, Optional[str], str, str, str]] = []
+        self.history: list[str] = []
         self.current_theme = "light"
+        self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self.last_dir = self.settings.value("paths/last_dir", str(Path.home()), type=str) or str(Path.home())
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
+        self.preview_timer.timeout.connect(self._refresh_preview_debounced)
+        self._signals_bound = False
+        self._execute_thread: Optional[QThread] = None
+        self._execute_worker: Optional[RenameWorker] = None
         self._build_window()
+        self._restore_ui_settings()
         self._apply_icon()
-        self._setup_stylesheet("light")
-        self.refresh_preview()
+        self.refresh_preview(show_errors=False)
 
     def _std_icon(self, which: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(which)
 
-    def _asset_icon(self, names: List[str], fallback: QStyle.StandardPixmap) -> QIcon:
+    def _asset_icon(self, names: list[str], fallback: QStyle.StandardPixmap) -> QIcon:
         asset = find_asset(names)
         if asset is not None:
             suffix = asset.suffix.lower()
@@ -204,6 +300,45 @@ class RenamerWindow(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "请先在 free_rename.py 中把 PROJECT_URL 改成你的 GitHub 仓库地址。")
             return
         QDesktopServices.openUrl(QUrl(PROJECT_URL))
+
+    def _restore_ui_settings(self) -> None:
+        theme = self.settings.value("ui/theme", "light", type=str) or "light"
+        self.current_theme = theme
+        self._setup_stylesheet(theme)
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.setCurrentText("深色" if theme == "dark" else "浅色")
+        self.theme_combo.blockSignals(False)
+        geometry = self.settings.value("ui/geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+
+    def _save_ui_settings(self) -> None:
+        self.settings.setValue("ui/theme", self.current_theme)
+        self.settings.setValue("ui/geometry", self.saveGeometry())
+        self.settings.setValue("paths/last_dir", self.last_dir)
+
+    def closeEvent(self, event) -> None:
+        if self._execute_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前仍有任务在执行，请等待完成后再关闭窗口。")
+            event.ignore()
+            return
+        self._save_ui_settings()
+        super().closeEvent(event)
+
+    def _normalize_dir(self, raw_path: str) -> str:
+        if not raw_path:
+            return str(Path.home())
+        path = Path(raw_path)
+        if path.is_file():
+            path = path.parent
+        return str(path if path.exists() else Path.home())
+
+    def _dialog_start_dir(self) -> str:
+        return self._normalize_dir(self.last_dir)
+
+    def _remember_path(self, raw_path: str) -> None:
+        self.last_dir = self._normalize_dir(raw_path)
+        self.settings.setValue("paths/last_dir", self.last_dir)
 
     def _build_window(self) -> None:
         self.setWindowTitle(f"{APP_TITLE} V{APP_VERSION}")
@@ -258,7 +393,7 @@ class RenamerWindow(QMainWindow):
             ("历史记录", self._asset_icon(["history.png", "icons8-历史-50.png"], QStyle.SP_BrowserReload)),
             ("设置", self._asset_icon(["settings.png", "settings.svg", "icons8-设置.svg"], QStyle.SP_FileDialogContentsView)),
         ]
-        self.nav_buttons: List[SidebarButton] = []
+        self.nav_buttons: list[SidebarButton] = []
         for idx, (label, nav_icon) in enumerate(items):
             btn = SidebarButton(label, nav_icon)
             btn.clicked.connect(lambda checked=False, i=idx: self._switch_page(i))
@@ -274,7 +409,7 @@ class RenamerWindow(QMainWindow):
         layout.addWidget(hint)
         return box
 
-    def _make_page_shell(self, title: str, subtitle: str) -> Tuple[QWidget, QVBoxLayout]:
+    def _make_page_shell(self, title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(24, 20, 24, 24)
@@ -473,7 +608,7 @@ class RenamerWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
-    def _make_group(self, title: str) -> Tuple[QGroupBox, QGridLayout]:
+    def _make_group(self, title: str) -> tuple[QGroupBox, QGridLayout]:
         g = QGroupBox(title)
         g.setObjectName("Group")
         grid = QGridLayout(g)
@@ -641,6 +776,8 @@ class RenamerWindow(QMainWindow):
         self.copy_mode_radio = QRadioButton("另存为副本")
         self.rename_mode_radio.setChecked(True)
         self.continue_on_error_check = QCheckBox("遇错继续")
+        self.continue_on_error_check.setEnabled(False)
+        self.continue_on_error_check.setToolTip("当前仍为整批事务执行，后续可继续扩展为单文件容错模式。")
         mode_row.addWidget(self.rename_mode_radio)
         mode_row.addWidget(self.copy_mode_radio)
         mode_row.addWidget(self.continue_on_error_check)
@@ -652,13 +789,23 @@ class RenamerWindow(QMainWindow):
         self.export_btn = QPushButton("导出当前列表")
         self.execute_btn = QPushButton("开始重命名")
         self.execute_btn.setObjectName("PrimaryButton")
-        self.refresh_btn.clicked.connect(self.refresh_preview)
+        self.refresh_btn.clicked.connect(lambda: self.refresh_preview())
         self.export_btn.clicked.connect(self.export_list)
         self.execute_btn.clicked.connect(self.execute)
         btn_row.addWidget(self.refresh_btn)
         btn_row.addWidget(self.export_btn)
         btn_row.addWidget(self.execute_btn)
         layout.addLayout(btn_row)
+
+        self.progress_label = QLabel("空闲")
+        self.progress_label.setObjectName("MutedLabel")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(1)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.progress_bar)
         return box
 
     def _switch_page(self, index: int) -> None:
@@ -904,8 +1051,9 @@ class RenamerWindow(QMainWindow):
 
     def _on_theme_changed(self, text: str) -> None:
         self._setup_stylesheet("dark" if text == "深色" else "light")
+        self.settings.setValue("ui/theme", self.current_theme)
 
-    def _watch_fields(self) -> List[QWidget]:
+    def _watch_fields(self) -> list[QWidget]:
         return [
             self.base_name_edit, self.start_num_edit, self.step_edit, self.digits_combo,
             self.sep_edit, self.position_combo, self.keep_ext_check, self.insert_enabled,
@@ -921,32 +1069,52 @@ class RenamerWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if not hasattr(self, "_signals_bound"):
+        if not self._signals_bound:
             for widget in self._watch_fields():
                 if isinstance(widget, QLineEdit):
-                    widget.textChanged.connect(self.refresh_preview)
+                    widget.textChanged.connect(self._schedule_preview_refresh)
                 elif isinstance(widget, QComboBox):
-                    widget.currentTextChanged.connect(self.refresh_preview)
+                    widget.currentTextChanged.connect(self._schedule_preview_refresh)
                 elif isinstance(widget, (QCheckBox, QRadioButton)):
-                    widget.toggled.connect(self.refresh_preview)
+                    widget.toggled.connect(self._schedule_preview_refresh)
             self._signals_bound = True
 
+    def _schedule_preview_refresh(self, *_args) -> None:
+        if self._execute_thread is not None:
+            return
+        self.progress_label.setText(f"输入已变更，{PREVIEW_DEBOUNCE_MS}ms 后自动刷新预览…")
+        self.preview_timer.start()
+
+    def _refresh_preview_debounced(self) -> None:
+        self.refresh_preview(show_errors=False)
+
+    def _set_execute_busy(self, busy: bool) -> None:
+        self.execute_btn.setEnabled(not busy)
+        self.refresh_btn.setEnabled(not busy)
+        self.export_btn.setEnabled(not busy)
+        self.tabs.setEnabled(not busy)
+        self.table.setEnabled(not busy)
+
     def add_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "选择文件")
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择文件", self._dialog_start_dir())
+        if paths:
+            self._remember_path(paths[0])
         self._append_paths(paths)
 
     def add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹", self._dialog_start_dir())
         if folder:
+            self._remember_path(folder)
             self._append_paths([str(p) for p in Path(folder).iterdir() if p.is_file()])
 
     def add_folder_recursive(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "选择文件夹（递归添加）")
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹（递归添加）", self._dialog_start_dir())
         if folder:
+            self._remember_path(folder)
             self._append_paths([str(p) for p in Path(folder).rglob("*") if p.is_file()])
 
-    def on_files_dropped(self, paths: List[str]) -> None:
-        expanded: List[str] = []
+    def on_files_dropped(self, paths: list[str]) -> None:
+        expanded: list[str] = []
         for raw in paths:
             p = Path(raw)
             if p.is_dir():
@@ -955,7 +1123,7 @@ class RenamerWindow(QMainWindow):
                 expanded.append(str(p))
         self._append_paths(expanded)
 
-    def _append_paths(self, paths: List[str]) -> None:
+    def _append_paths(self, paths: list[str]) -> None:
         existing = {str(item.path).lower() for item in self.files}
         added = 0
         for raw in paths:
@@ -964,9 +1132,11 @@ class RenamerWindow(QMainWindow):
                 self.files.append(FileItem(p))
                 existing.add(str(p).lower())
                 added += 1
+        if paths:
+            self._remember_path(paths[0])
         self.status.showMessage(f"已添加 {added} 个文件")
         self.history.append(f"添加文件：{added} 个")
-        self.refresh_preview()
+        self.refresh_preview(show_errors=False)
 
     def remove_selected(self) -> None:
         rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
@@ -1116,11 +1286,11 @@ class RenamerWindow(QMainWindow):
             raise ValueError("目标路径过长")
         return final_name
 
-    def generate_preview(self) -> List[Tuple[FileItem, Optional[str], str, str, str]]:
+    def generate_preview(self) -> list[tuple[FileItem, Optional[str], str, str, str]]:
         start_num = self._parse_int(self.start_num_edit.text().strip(), "起始编号")
         step = self._parse_int(self.step_edit.text().strip(), "递增量", minimum=1)
         regex_rule = self._get_compiled_regex()
-        preview: List[Tuple[FileItem, Optional[str], str, str, str]] = []
+        preview: list[tuple[FileItem, Optional[str], str, str, str]] = []
         seq_index = 0
         for item in self.files:
             if not self._passes_filter(item):
@@ -1135,16 +1305,23 @@ class RenamerWindow(QMainWindow):
                 preview.append((item, None, f"错误：{exc}", item.ext or "-", str(item.folder)))
         return preview
 
-    def refresh_preview(self) -> None:
+    def refresh_preview(self, show_errors: bool = True) -> None:
+        self.preview_timer.stop()
         self.file_count_label.setText(f"{len(self.files)} 个文件")
         try:
-            self.preview_rows = self.generate_preview() if self.files else []
+            new_preview = self.generate_preview() if self.files else []
         except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, str(exc))
-            self.preview_rows = []
+            if show_errors:
+                QMessageBox.warning(self, APP_TITLE, str(exc))
+            self.status.showMessage(f"预览未更新：{exc}")
+            self.progress_label.setText(f"预览参数无效：{exc}")
+            return
+        self.preview_rows = new_preview
         self._render_preview()
         self._update_home_stats()
         self._refresh_history_panel()
+        if self._execute_thread is None:
+            self.progress_label.setText("预览已更新")
 
     def _render_preview(self) -> None:
         self.table.setRowCount(0)
@@ -1153,7 +1330,7 @@ class RenamerWindow(QMainWindow):
             self.home_info.setPlainText("还没有导入文件。\n\n你可以从左侧工作区进入‘批量重命名’，也可以在首页快速添加文件。")
             return
 
-        target_map: Dict[str, int] = {}
+        target_map: dict[str, int] = {}
         for item, new_name, _state, _ext, _folder in self.preview_rows:
             if new_name:
                 target = str(item.folder / new_name).lower()
@@ -1195,7 +1372,7 @@ class RenamerWindow(QMainWindow):
     def _update_home_stats(self) -> None:
         total = len(self.preview_rows)
         ready = dup = err = 0
-        target_map: Dict[str, int] = {}
+        target_map: dict[str, int] = {}
         for item, new_name, _state, _ext, _folder in self.preview_rows:
             if new_name:
                 target = str(item.folder / new_name).lower()
@@ -1217,10 +1394,10 @@ class RenamerWindow(QMainWindow):
         for text in self.history[-100:][::-1]:
             self.history_list.addItem(text)
 
-    def validate_execute(self) -> List[Tuple[FileItem, str]]:
+    def validate_execute(self) -> list[tuple[FileItem, str]]:
         if not self.preview_rows:
             raise ValueError("没有可处理的文件")
-        todo: List[Tuple[FileItem, str]] = []
+        todo: list[tuple[FileItem, str]] = []
         seen: set[str] = set()
         for item, new_name, state, _ext, _folder in self.preview_rows:
             if state == "跳过":
@@ -1236,81 +1413,95 @@ class RenamerWindow(QMainWindow):
             raise ValueError("没有可执行的文件")
         return todo
 
-    def _move_path(self, source: Path, target: Path) -> None:
-        try:
-            os.rename(source, target)
-        except OSError:
-            shutil.move(str(source), str(target))
-
     def execute(self) -> None:
+        if self._execute_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前任务仍在执行中，请稍后。")
+            return
         try:
             self.refresh_preview()
             tasks = self.validate_execute()
         except ValueError as exc:
             QMessageBox.critical(self, APP_TITLE, str(exc))
             return
-        mode_text = "另存为副本" if self.copy_mode_radio.isChecked() else "覆盖原文件"
+        mode = "copy" if self.copy_mode_radio.isChecked() else "rename"
+        mode_text = "另存为副本" if mode == "copy" else "覆盖原文件"
         if QMessageBox.question(self, APP_TITLE, f"确认开始处理吗？\n\n文件数量：{len(tasks)}\n执行方式：{mode_text}") != QMessageBox.Yes:
             return
-        try:
-            if self.copy_mode_radio.isChecked():
-                self._execute_copy(tasks)
-            else:
-                self._execute_rename(tasks)
-        except Exception as exc:
-            QMessageBox.critical(self, APP_TITLE, f"处理失败：{exc}")
-            self.history.append(f"执行失败：{exc}")
-            self.refresh_preview()
-            return
-        self.history.append(f"执行完成：{len(tasks)} 个文件，模式={mode_text}")
-        self.refresh_preview()
-        QMessageBox.information(self, APP_TITLE, f"处理完成，共 {len(tasks)} 个文件。")
 
-    def _execute_copy(self, tasks: List[Tuple[FileItem, str]]) -> None:
-        for item, new_name in tasks:
-            target = item.folder / new_name
-            if target.exists():
-                raise FileExistsError(f"目标文件已存在：{target}")
-        for item, new_name in tasks:
-            shutil.copy2(item.path, item.folder / new_name)
+        total_steps = len(tasks) if mode == "copy" else max(len(tasks) * 2, 1)
+        self.progress_bar.setRange(0, total_steps)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat(f"0/{total_steps}")
+        self.progress_label.setText("任务已开始，正在后台处理…")
+        self.status.showMessage(f"开始执行：{len(tasks)} 个文件，模式={mode_text}")
+        self.history.append(f"开始执行：{len(tasks)} 个文件，模式={mode_text}")
+        self._refresh_history_panel()
+        self._set_execute_busy(True)
 
-    def _execute_rename(self, tasks: List[Tuple[FileItem, str]]) -> None:
-        temp_pairs: List[Tuple[FileItem, Path, str]] = []
-        for idx, (item, new_name) in enumerate(tasks):
-            temp_path = item.folder / f"{TEMP_PREFIX}{idx}__{item.name}"
-            if temp_path.exists():
-                raise FileExistsError(f"临时文件名已存在：{temp_path}")
-            self._move_path(item.path, temp_path)
-            temp_pairs.append((item, temp_path, new_name))
-        try:
-            updated: Dict[str, Path] = {}
-            for item, temp_path, new_name in temp_pairs:
-                final_path = item.folder / new_name
-                if final_path.exists():
-                    raise FileExistsError(f"目标文件已存在：{final_path}")
-                self._move_path(temp_path, final_path)
-                updated[str(item.path).lower()] = final_path
+        self._execute_thread = QThread(self)
+        self._execute_worker = RenameWorker(tasks, mode)
+        self._execute_worker.moveToThread(self._execute_thread)
+        self._execute_thread.started.connect(self._execute_worker.run)
+        self._execute_worker.progress.connect(self._on_execute_progress)
+        self._execute_worker.finished.connect(self._on_execute_finished)
+        self._execute_worker.finished.connect(self._execute_thread.quit)
+        self._execute_worker.failed.connect(self._on_execute_failed)
+        self._execute_worker.failed.connect(self._execute_thread.quit)
+        self._execute_thread.finished.connect(self._cleanup_execute_thread)
+        self._execute_thread.start()
+
+    def _on_execute_progress(self, current: int, total: int, message: str) -> None:
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(current)
+        self.progress_bar.setFormat(f"{current}/{total}")
+        self.progress_label.setText(message)
+        self.status.showMessage(message)
+
+    def _on_execute_finished(self, result: object) -> None:
+        data = result if isinstance(result, dict) else {}
+        updated_raw = data.get("updated", {})
+        if isinstance(updated_raw, dict) and updated_raw:
+            updated = {key: Path(value) for key, value in updated_raw.items()}
             self.files = [FileItem(updated.get(str(item.path).lower(), item.path)) for item in self.files]
-        except Exception:
-            for item, temp_path, new_name in temp_pairs:
-                original = item.path
-                final_path = item.folder / new_name
-                try:
-                    if temp_path.exists():
-                        self._move_path(temp_path, original)
-                    elif final_path.exists() and final_path != original:
-                        self._move_path(final_path, original)
-                except Exception:
-                    pass
-            raise
+        completed = int(data.get("completed", 0) or 0)
+        mode = str(data.get("mode", "rename"))
+        mode_text = "另存为副本" if mode == "copy" else "覆盖原文件"
+        self._set_execute_busy(False)
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        self.progress_bar.setFormat(f"{self.progress_bar.maximum()}/{self.progress_bar.maximum()}")
+        self.history.append(f"执行完成：{completed} 个文件，模式={mode_text}")
+        self._refresh_history_panel()
+        self.refresh_preview(show_errors=False)
+        self.progress_label.setText(f"处理完成：{completed} 个文件")
+        self.status.showMessage(f"处理完成，共 {completed} 个文件。")
+        QMessageBox.information(self, APP_TITLE, f"处理完成，共 {completed} 个文件。")
+
+    def _on_execute_failed(self, error_text: str) -> None:
+        self._set_execute_busy(False)
+        self.progress_label.setText(f"处理失败：{error_text}")
+        self.status.showMessage(f"处理失败：{error_text}")
+        self.history.append(f"执行失败：{error_text}")
+        self._refresh_history_panel()
+        self.refresh_preview(show_errors=False)
+        QMessageBox.critical(self, APP_TITLE, f"处理失败：{error_text}")
+
+    def _cleanup_execute_thread(self) -> None:
+        if self._execute_worker is not None:
+            self._execute_worker.deleteLater()
+        if self._execute_thread is not None:
+            self._execute_thread.deleteLater()
+        self._execute_worker = None
+        self._execute_thread = None
 
     def export_list(self) -> None:
         if not self.preview_rows:
             QMessageBox.information(self, APP_TITLE, "当前没有可导出的内容。")
             return
-        save_path, _ = QFileDialog.getSaveFileName(self, "导出当前列表", str(Path.home() / "rename_preview.csv"), "CSV Files (*.csv);;Text Files (*.txt)")
+        default_path = str(Path(self._dialog_start_dir()) / "rename_preview.csv")
+        save_path, _ = QFileDialog.getSaveFileName(self, "导出当前列表", default_path, "CSV Files (*.csv);;Text Files (*.txt)")
         if not save_path:
             return
+        self._remember_path(save_path)
         try:
             path = Path(save_path)
             if path.suffix.lower() == ".csv":
