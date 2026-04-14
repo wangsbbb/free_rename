@@ -6,16 +6,16 @@ set "ROOT=%~dp0"
 cd /d "%ROOT%"
 set "LOG=%ROOT%build_free_rename_log.txt"
 
-echo [INFO] free_rename onedir build > "%LOG%"
+echo [INFO] free_rename v1.0.14 onedir build > "%LOG%"
 echo [INFO] Working dir: %ROOT%>> "%LOG%"
 
 echo.
 echo === free_rename onedir build ===
 echo.
 
-if not exist "%ROOT%free_rename.py" (
-  echo [ERROR] free_rename.py not found.
-  echo [ERROR] free_rename.py not found.>> "%LOG%"
+if not exist "%ROOT%src\free_rename.py" (
+  echo [ERROR] src\free_rename.py not found.
+  echo [ERROR] src\free_rename.py not found.>> "%LOG%"
   pause
   exit /b 1
 )
@@ -38,22 +38,17 @@ if not defined PYTHON_EXE (
   exit /b 1
 )
 
+for /f "usebackq delims=" %%i in (`%PYTHON_EXE% -c "import sysconfig; print(sysconfig.get_path('scripts') or '')"`) do set "PY_SCRIPTS=%%i"
+for /f "usebackq delims=" %%i in (`%PYTHON_EXE% -c "import site,os; ub=site.getuserbase(); print(os.path.join(ub, 'Scripts') if ub else '')"`) do set "PY_USER_SCRIPTS=%%i"
+if defined PY_SCRIPTS set "PATH=%PY_SCRIPTS%;%PATH%"
+if defined PY_USER_SCRIPTS set "PATH=%PY_USER_SCRIPTS%;%PATH%"
+
 echo [INFO] Python: %PYTHON_EXE%
 echo [INFO] Python: %PYTHON_EXE%>> "%LOG%"
-
-for /f "usebackq delims=" %%I in (`%PYTHON_EXE% -c "import sysconfig; print(sysconfig.get_path('scripts'))"`) do set "PY_SCRIPTS=%%I"
-for /f "usebackq delims=" %%I in (`%PYTHON_EXE% -c "import site, os; print(os.path.join(site.getuserbase(), 'Scripts'))"`) do set "PY_USER_SCRIPTS=%%I"
-
-if defined PY_SCRIPTS (
-  set "PATH=%PY_SCRIPTS%;%PATH%"
-  echo [INFO] Python Scripts: %PY_SCRIPTS%
-  echo [INFO] Python Scripts: %PY_SCRIPTS%>> "%LOG%"
-)
-if defined PY_USER_SCRIPTS (
-  set "PATH=%PY_USER_SCRIPTS%;%PATH%"
-  echo [INFO] User Scripts: %PY_USER_SCRIPTS%
-  echo [INFO] User Scripts: %PY_USER_SCRIPTS%>> "%LOG%"
-)
+echo [INFO] Python Scripts: %PY_SCRIPTS%
+echo [INFO] Python Scripts: %PY_SCRIPTS%>> "%LOG%"
+echo [INFO] User Scripts: %PY_USER_SCRIPTS%
+echo [INFO] User Scripts: %PY_USER_SCRIPTS%>> "%LOG%"
 
 call %PYTHON_EXE% -m pip install --upgrade pip >> "%LOG%" 2>&1
 call %PYTHON_EXE% -m pip install -r "%ROOT%requirements_free_rename.txt" pyinstaller >> "%LOG%" 2>&1
@@ -66,7 +61,7 @@ if errorlevel 1 (
 
 echo [INFO] Syncing version...
 echo [INFO] Syncing version...>> "%LOG%"
-call %PYTHON_EXE% "%ROOT%sync_version.py" >> "%LOG%" 2>&1
+call %PYTHON_EXE% "%ROOT%src\sync_version.py" >> "%LOG%" 2>&1
 if errorlevel 1 (
   echo [ERROR] Version sync failed. See build_free_rename_log.txt
   echo [ERROR] Version sync failed.>> "%LOG%"
@@ -76,7 +71,7 @@ if errorlevel 1 (
 
 echo [INFO] Building Qt resources...
 echo [INFO] Building Qt resources...>> "%LOG%"
-call %PYTHON_EXE% "%ROOT%build_resources.py" >> "%LOG%" 2>&1
+call %PYTHON_EXE% "%ROOT%src\build_resources.py" >> "%LOG%" 2>&1
 if errorlevel 1 (
   echo [ERROR] Qt resource compile failed. See build_free_rename_log.txt
   echo [ERROR] Qt resource compile failed.>> "%LOG%"

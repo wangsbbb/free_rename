@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.14
+
+- 所有 Python 源码统一移入 `src/` 目录，根目录保留文档、配置与构建脚本
+- `run_free_rename.bat` 改为从 `src/free_rename.py` 启动
+- `free_rename.spec`、`build_resources.py`、`sync_version.py`、构建脚本全部适配新的 `src/` 结构
+- Qt 资源编译输出调整为 `src/resources_rc.py`，根目录不再混放 Python 文件
+
 ## 1.0.13
 
 - PyInstaller 打包改为 onedir，降低启动时的自解压开销

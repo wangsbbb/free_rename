@@ -2,7 +2,7 @@
 
 一款开源的批量重命名软件，轻量，便捷，持续优化更新中。
 
-当前版本：**1.0.13**
+当前版本：**1.0.14**
 
 ## 功能特点
 
@@ -28,7 +28,7 @@
 
 ```bash
 pip install -r requirements_free_rename.txt
-python free_rename.py
+python src/free_rename.py
 ```
 
 Windows 下也可以直接双击：
@@ -55,24 +55,32 @@ free_rename/
 ├─ styles/
 │  ├─ light.qss
 │  └─ dark.qss
-├─ resources.qrc
-├─ resources_rc.py
-├─ free_rename.py
-├─ ui_main.py
-├─ rule_engine.py
-├─ file_manager.py
-├─ workers.py
+├─ src/
+│  ├─ free_rename.py
+│  ├─ ui_main.py
+│  ├─ rule_engine.py
+│  ├─ file_manager.py
+│  ├─ workers.py
+│  ├─ build_resources.py
+│  ├─ sync_version.py
+│  └─ resources_rc.py
 ├─ free_rename.spec
 ├─ requirements_free_rename.txt
 ├─ run_free_rename.bat
 ├─ build_free_rename_exe.bat
-├─ build_resources.py
-├─ sync_version.py
 ├─ launch_free_rename.bat
+├─ resources.qrc
 ├─ version_info.txt
 ├─ .gitignore
 └─ README.md
 ```
+
+
+## 1.0.14 更新内容
+1. **代码目录重构**：所有 `.py` 文件统一移入 `src/` 目录，根目录仅保留说明文档、构建脚本、资源描述和版本配置。
+2. **运行入口同步**：`run_free_rename.bat` 改为从 `src/free_rename.py` 启动，本地运行路径更清晰。
+3. **打包路径同步**：`free_rename.spec`、`build_resources.py`、`sync_version.py`、`build_free_rename_exe.bat` 全部适配 `src/` 目录结构。
+4. **资源输出位置调整**：Qt 资源编译输出改为 `src/resources_rc.py`，避免根目录混放 Python 文件。
 
 ## 1.0.13 更新内容
 1. **打包模式优化**：PyInstaller 打包改为 `onedir`，启动速度比 `onefile` 更快，更适合桌面工具分发。

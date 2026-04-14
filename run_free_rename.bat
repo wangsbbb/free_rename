@@ -1,4 +1,3 @@
-\
 @echo off
 setlocal
 cd /d "%~dp0"
@@ -15,14 +14,14 @@ if not defined PYEXE (
   exit /b 1
 )
 
-if not exist "free_rename.py" (
-  echo free_rename.py not found.
+if not exist "src\free_rename.py" (
+  echo src\free_rename.py not found.
   pause
   exit /b 1
 )
 
 echo Using Python: %PYEXE%
 %PYEXE% -m pip install --disable-pip-version-check -q -r requirements_free_rename.txt >nul 2>nul
-%PYEXE% free_rename.py
+%PYEXE% src\free_rename.py
 if errorlevel 1 pause
 endlocal

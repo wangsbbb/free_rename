@@ -51,7 +51,7 @@ except Exception:
     resources_rc = None
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350
@@ -60,7 +60,7 @@ SETTINGS_APP = "free_rename"
 
 
 def resource_path(relative_path: str) -> str:
-    base_path = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+    base_path = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)
     return str(Path(base_path) / relative_path)
 
 
@@ -73,7 +73,7 @@ def qrc_style_path(theme: str) -> str:
 
 
 def find_asset(candidates: list[str]) -> Optional[Path]:
-    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     search_roots = [
         base_path / "assets" / "icons",
         base_path / "assets",

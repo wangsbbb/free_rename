@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-# PyInstaller 执行 spec 时不保证 __file__ 可用，改用 SPECPATH。
 project_dir = Path(globals().get('SPECPATH', '.')).resolve()
+src_dir = project_dir / 'src'
 icon_file = project_dir / 'assets' / 'icons' / 'app_icon_final.ico'
 version_file = project_dir / 'version_info.txt'
 
@@ -49,8 +49,8 @@ qt_excludes = [
 ]
 
 a = Analysis(
-    [str(project_dir / 'free_rename.py')],
-    pathex=[str(project_dir)],
+    [str(src_dir / 'free_rename.py')],
+    pathex=[str(src_dir)],
     binaries=[],
     datas=[],
     hiddenimports=['resources_rc'],
