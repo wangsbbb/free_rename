@@ -2,7 +2,7 @@
 
 一款开源的批量重命名软件，轻量，便捷，持续优化更新中。
 
-当前版本：**1.0.12**
+当前版本：**1.0.13**
 
 ## 功能特点
 
@@ -17,7 +17,7 @@
 - 支持取消预览 / 扫描 / 执行中的后台任务
 - 主题、窗口状态、规则参数会自动记忆
 - 历史记录会自动落盘，重启后仍可查看
-- 支持外部 `styles/light.qss` 与 `styles/dark.qss`
+- 支持 Qt 资源内嵌样式与图标，打包后不依赖外部 assets/styles 文件
 
 ## 运行环境
 
@@ -43,7 +43,8 @@ Windows 下也可以直接双击：
 
 双击运行后，会在 `dist/` 目录生成：
 
-- `free_rename.exe`
+- `free_rename/`（主程序目录）
+- `launch_free_rename.bat`（启动器）
 
 ## 项目结构
 
@@ -54,6 +55,8 @@ free_rename/
 ├─ styles/
 │  ├─ light.qss
 │  └─ dark.qss
+├─ resources.qrc
+├─ resources_rc.py
 ├─ free_rename.py
 ├─ ui_main.py
 ├─ rule_engine.py
@@ -63,10 +66,19 @@ free_rename/
 ├─ requirements_free_rename.txt
 ├─ run_free_rename.bat
 ├─ build_free_rename_exe.bat
+├─ build_resources.py
+├─ sync_version.py
+├─ launch_free_rename.bat
 ├─ version_info.txt
 ├─ .gitignore
 └─ README.md
 ```
+
+## 1.0.13 更新内容
+1. **打包模式优化**：PyInstaller 打包改为 `onedir`，启动速度比 `onefile` 更快，更适合桌面工具分发。
+2. **版本自动同步**：新增 `sync_version.py`，以 `version_info.txt` 为单一版本源，构建前自动同步程序与文档版本。
+3. **Qt 资源内嵌**：新增 `resources.qrc` 与 `build_resources.py`，图标和 QSS 可编译进 Qt 资源，减少 EXE 对外部资源目录的依赖。
+4. **打包脚本增强**：构建脚本自动执行版本同步、Qt 资源编译，并支持可选 `UPX_DIR` 压缩参数。
 
 ## 1.0.12 更新内容
 1. **扫描性能优化**：`ScanWorker` 的目录扫描改为基于 `os.scandir`，递归导入与大目录扫描更快。

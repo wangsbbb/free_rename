@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QAbstractTableModel, QFile, QModelIndex, QIODevice, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,8 +45,13 @@ from file_manager import FileManager
 from rule_engine import FileItem, PreviewRow, PreviewSummary, RuleConfig, RuleEngine
 from workers import PreviewWorker, RenameWorker, ScanWorker
 
+try:
+    import resources_rc  # type: ignore  # noqa: F401
+except Exception:
+    resources_rc = None
+
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350
@@ -57,6 +62,14 @@ SETTINGS_APP = "free_rename"
 def resource_path(relative_path: str) -> str:
     base_path = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
     return str(Path(base_path) / relative_path)
+
+
+def qrc_asset_path(name: str) -> str:
+    return f":/assets/icons/{name}"
+
+
+def qrc_style_path(theme: str) -> str:
+    return f":/styles/{theme}.qss"
 
 
 def find_asset(candidates: list[str]) -> Optional[Path]:
@@ -72,6 +85,22 @@ def find_asset(candidates: list[str]) -> Optional[Path]:
             if path.exists():
                 return path
     return None
+
+
+def read_qt_resource_text(path: str) -> Optional[str]:
+    file = QFile(path)
+    if not file.exists():
+        return None
+    if not file.open(QIODevice.OpenModeFlag.ReadOnly | QIODevice.OpenModeFlag.Text):
+        return None
+    try:
+        data = bytes(file.readAll())
+    finally:
+        file.close()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="ignore")
 
 class DropTable(QTableView):
     filesDropped = Signal(list)
@@ -445,6 +474,9 @@ def build_embedded_stylesheet(theme: str) -> str:
 
 
 def load_stylesheet(theme: str) -> str:
+    qrc_text = read_qt_resource_text(qrc_style_path(theme))
+    if qrc_text:
+        return qrc_text
     style_path = Path(resource_path(f"styles/{theme}.qss"))
     try:
         if style_path.exists():
@@ -493,6 +525,10 @@ class RenamerWindow(QMainWindow):
         return self.style().standardIcon(which)
 
     def _asset_icon(self, names: list[str], fallback: QStyle.StandardPixmap) -> QIcon:
+        for name in names:
+            icon = QIcon(qrc_asset_path(name))
+            if not icon.isNull():
+                return icon
         asset = find_asset(names)
         if asset is not None:
             suffix = asset.suffix.lower()

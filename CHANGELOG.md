@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.13
+
+- PyInstaller 打包改为 onedir，降低启动时的自解压开销
+- 新增 sync_version.py，以 version_info.txt 为单一版本源自动同步版本号
+- 新增 resources.qrc / build_resources.py，支持将图标与 QSS 编译进 Qt 资源
+- 构建脚本增强：自动同步版本、编译资源，并支持可选 UPX_DIR 压缩
+
 ## 1.0.12
 
 - `ScanWorker` 目录扫描改为基于 `os.scandir`，递归导入大目录更快

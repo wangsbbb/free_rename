@@ -1,0 +1,15 @@
+<RCC>
+  <qresource prefix="/assets/icons">
+    <file alias="app_icon_final.ico">assets/icons/app_icon_final.ico</file>
+    <file alias="app_icon_final.png">assets/icons/app_icon_final.png</file>
+    <file alias="github.png">assets/icons/github.png</file>
+    <file alias="history.png">assets/icons/history.png</file>
+    <file alias="home.png">assets/icons/home.png</file>
+    <file alias="rename.png">assets/icons/rename.png</file>
+    <file alias="settings.png">assets/icons/settings.png</file>
+  </qresource>
+  <qresource prefix="/styles">
+    <file alias="light.qss">styles/light.qss</file>
+    <file alias="dark.qss">styles/dark.qss</file>
+  </qresource>
+</RCC>

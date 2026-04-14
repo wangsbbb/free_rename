@@ -1,4 +1,3 @@
-\
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul 2>&1
@@ -7,11 +6,11 @@ set "ROOT=%~dp0"
 cd /d "%ROOT%"
 set "LOG=%ROOT%build_free_rename_log.txt"
 
-echo [INFO] free_rename v1.0.6 onefile build > "%LOG%"
+echo [INFO] free_rename onedir build > "%LOG%"
 echo [INFO] Working dir: %ROOT%>> "%LOG%"
 
 echo.
-echo === free_rename v1.0.6 onefile build ===
+echo === free_rename onedir build ===
 echo.
 
 if not exist "%ROOT%free_rename.py" (
@@ -42,15 +41,19 @@ if not defined PYTHON_EXE (
 echo [INFO] Python: %PYTHON_EXE%
 echo [INFO] Python: %PYTHON_EXE%>> "%LOG%"
 
-if not exist "%ROOT%assets" (
-  echo [ERROR] assets folder not found.
-  echo [ERROR] assets folder not found.>> "%LOG%"
-  pause
-  exit /b 1
-)
+for /f "usebackq delims=" %%I in (`%PYTHON_EXE% -c "import sysconfig; print(sysconfig.get_path('scripts'))"`) do set "PY_SCRIPTS=%%I"
+for /f "usebackq delims=" %%I in (`%PYTHON_EXE% -c "import site, os; print(os.path.join(site.getuserbase(), 'Scripts'))"`) do set "PY_USER_SCRIPTS=%%I"
 
-set "ICON_FILE=%ROOT%assets\icons\app_icon_final.ico"
-set "VERSION_FILE=%ROOT%version_info.txt"
+if defined PY_SCRIPTS (
+  set "PATH=%PY_SCRIPTS%;%PATH%"
+  echo [INFO] Python Scripts: %PY_SCRIPTS%
+  echo [INFO] Python Scripts: %PY_SCRIPTS%>> "%LOG%"
+)
+if defined PY_USER_SCRIPTS (
+  set "PATH=%PY_USER_SCRIPTS%;%PATH%"
+  echo [INFO] User Scripts: %PY_USER_SCRIPTS%
+  echo [INFO] User Scripts: %PY_USER_SCRIPTS%>> "%LOG%"
+)
 
 call %PYTHON_EXE% -m pip install --upgrade pip >> "%LOG%" 2>&1
 call %PYTHON_EXE% -m pip install -r "%ROOT%requirements_free_rename.txt" pyinstaller >> "%LOG%" 2>&1
@@ -61,18 +64,37 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo [INFO] Syncing version...
+echo [INFO] Syncing version...>> "%LOG%"
+call %PYTHON_EXE% "%ROOT%sync_version.py" >> "%LOG%" 2>&1
+if errorlevel 1 (
+  echo [ERROR] Version sync failed. See build_free_rename_log.txt
+  echo [ERROR] Version sync failed.>> "%LOG%"
+  pause
+  exit /b 1
+)
+
+echo [INFO] Building Qt resources...
+echo [INFO] Building Qt resources...>> "%LOG%"
+call %PYTHON_EXE% "%ROOT%build_resources.py" >> "%LOG%" 2>&1
+if errorlevel 1 (
+  echo [ERROR] Qt resource compile failed. See build_free_rename_log.txt
+  echo [ERROR] Qt resource compile failed.>> "%LOG%"
+  pause
+  exit /b 1
+)
+
 if exist "%ROOT%build" rmdir /s /q "%ROOT%build"
 if exist "%ROOT%dist" rmdir /s /q "%ROOT%dist"
 
 echo [INFO] Running PyInstaller...
 echo [INFO] Running PyInstaller...>> "%LOG%"
 
-set "PYI_CMD=%PYTHON_EXE% -m PyInstaller --noconfirm --clean --windowed --onefile --name free_rename --add-data assets;assets --add-data styles;styles"
-if exist "%ICON_FILE%" set "PYI_CMD=!PYI_CMD! --icon "%ICON_FILE%""
-if exist "%VERSION_FILE%" set "PYI_CMD=!PYI_CMD! --version-file "%VERSION_FILE%""
-set "PYI_CMD=!PYI_CMD! "%ROOT%free_rename.py""
+set "UPX_ARG="
+if defined UPX_DIR if exist "%UPX_DIR%\upx.exe" set "UPX_ARG=--upx-dir "%UPX_DIR%""
+if not defined UPX_ARG if exist "%ROOT%tools\upx\upx.exe" set "UPX_ARG=--upx-dir "%ROOT%tools\upx""
 
-call !PYI_CMD! >> "%LOG%" 2>&1
+call %PYTHON_EXE% -m PyInstaller --noconfirm --clean !UPX_ARG! "%ROOT%free_rename.spec" >> "%LOG%" 2>&1
 if errorlevel 1 (
   echo [ERROR] Build failed. See build_free_rename_log.txt
   echo [ERROR] Build failed.>> "%LOG%"
@@ -80,10 +102,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if exist "%ROOT%dist\free_rename.exe" (
+if exist "%ROOT%dist\free_rename\free_rename.exe" (
+  copy /y "%ROOT%launch_free_rename.bat" "%ROOT%dist\launch_free_rename.bat" >nul 2>nul
   echo.
-  echo [OK] Build complete: dist\free_rename.exe
-  echo [OK] Build complete: dist\free_rename.exe>> "%LOG%"
+  echo [OK] Build complete: dist\free_rename\free_rename.exe
+  echo [OK] Build complete: dist\free_rename\free_rename.exe>> "%LOG%"
 ) else (
   echo [ERROR] Build output not found.
   echo [ERROR] Build output not found.>> "%LOG%"
@@ -92,7 +115,7 @@ if exist "%ROOT%dist\free_rename.exe" (
 )
 
 echo.
-echo Note: onefile EXE extracts runtime files on first launch.
-echo If Windows still shows the old icon, delete the old shortcut and create a new one.
+echo Note: this build uses onedir mode for faster startup.
+echo Optional: set UPX_DIR to enable additional executable compression.
 pause
 exit /b 0
