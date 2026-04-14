@@ -46,7 +46,7 @@ from rule_engine import FileItem, PreviewRow, PreviewSummary, RuleConfig, RuleEn
 from workers import PreviewWorker, RenameWorker, ScanWorker
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350

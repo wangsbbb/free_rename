@@ -139,6 +139,13 @@ class RuleEngine:
         return re.compile(pattern, flags), config.regex_replace
 
     @staticmethod
+    def get_compiled_replace_rule(config: RuleConfig) -> Optional[tuple[re.Pattern[str], str, int]]:
+        if not config.replace_enabled or config.replace_case_sensitive or config.replace_find == '':
+            return None
+        count = 1 if config.replace_first_only else 0
+        return re.compile(re.escape(config.replace_find), re.IGNORECASE), config.replace_to, count
+
+    @staticmethod
     def _safe_timestamp(item: FileItem, attr: str) -> float:
         try:
             return float(getattr(item.path.stat(), attr))
@@ -151,10 +158,10 @@ class RuleEngine:
         mode = config.sort_mode if config.sort_mode in RuleEngine.SORT_MODES else '当前顺序'
         if mode == '文件名':
             items.sort(key=lambda item: (item.name.lower(), str(item.path).lower()))
-        elif mode == '修改时间':
-            items.sort(key=lambda item: (RuleEngine._safe_timestamp(item, 'st_mtime'), item.name.lower(), str(item.path).lower()))
-        elif mode == '创建时间':
-            items.sort(key=lambda item: (RuleEngine._safe_timestamp(item, 'st_ctime'), item.name.lower(), str(item.path).lower()))
+        elif mode in {'修改时间', '创建时间'}:
+            safe_timestamp = RuleEngine._safe_timestamp
+            attr = 'st_mtime' if mode == '修改时间' else 'st_ctime'
+            items.sort(key=lambda item, safe=safe_timestamp, attr_name=attr: (safe(item, attr_name), item.name.lower(), str(item.path).lower()))
         elif mode == '扩展名':
             items.sort(key=lambda item: (item.ext.lower(), item.path.stem.lower(), str(item.path).lower()))
         if config.sort_reverse:
@@ -219,20 +226,61 @@ class RuleEngine:
         return compiled.sub(repl, stem)
 
     @staticmethod
-    def build_final_name(item: FileItem, seq_num: int, config: RuleConfig, regex_rule: Optional[tuple[re.Pattern[str], str]]) -> str:
+    def build_final_name(
+        item: FileItem,
+        seq_num: int,
+        config: RuleConfig,
+        regex_rule: Optional[tuple[re.Pattern[str], str]],
+        replace_rule: Optional[tuple[re.Pattern[str], str, int]],
+    ) -> str:
         number_text = str(seq_num).zfill(config.digits)
-        if config.base_name:
+        base_name = config.base_name
+        if base_name:
             if config.position == '前面':
-                stem = f'{number_text}{config.separator}{config.base_name}'
+                stem = f'{number_text}{config.separator}{base_name}'
             else:
-                stem = f'{config.base_name}{config.separator}{number_text}'
+                stem = f'{base_name}{config.separator}{number_text}'
         else:
             stem = number_text
 
-        stem = RuleEngine.apply_insert(stem, config)
-        stem = RuleEngine.apply_replace(stem, config)
-        stem = RuleEngine.apply_delete(stem, config)
-        stem = RuleEngine.apply_regex(stem, regex_rule)
+        if config.insert_enabled and config.insert_text:
+            insert_text = config.insert_text
+            if config.insert_mode == '前面':
+                stem = insert_text + stem
+            elif config.insert_mode == '后面':
+                stem = stem + insert_text
+            else:
+                pos = max(0, min(len(stem), config.insert_index - 1))
+                stem = stem[:pos] + insert_text + stem[pos:]
+
+        if config.replace_enabled and config.replace_find != '':
+            if config.replace_case_sensitive:
+                if config.replace_first_only:
+                    stem = stem.replace(config.replace_find, config.replace_to, 1)
+                else:
+                    stem = stem.replace(config.replace_find, config.replace_to)
+            elif replace_rule is not None:
+                pattern, repl, count = replace_rule
+                stem = pattern.sub(repl, stem, count=count)
+
+        if config.delete_enabled:
+            mode = config.delete_mode.strip()
+            if mode == '删除文本':
+                if config.delete_text:
+                    stem = stem.replace(config.delete_text, '')
+            elif mode == '按区间删除':
+                start = max(config.delete_start - 1, 0)
+                end = start + config.delete_length
+                stem = stem[:start] + stem[end:]
+            elif mode == '删除前缀':
+                stem = stem[config.delete_prefix_count:]
+            elif mode == '删除后缀' and config.delete_suffix_count > 0:
+                stem = stem[:-config.delete_suffix_count]
+
+        if regex_rule is not None:
+            pattern, repl = regex_rule
+            stem = pattern.sub(repl, stem)
+
         stem = RuleEngine.sanitize_name(stem)
 
         if not stem:
@@ -253,45 +301,69 @@ class RuleEngine:
         progress: Optional[Callable[[int, int, str], None]] = None,
     ) -> list[PreviewRow]:
         regex_rule = RuleEngine.get_compiled_regex(config)
+        replace_rule = RuleEngine.get_compiled_replace_rule(config)
         ordered_files = RuleEngine.sort_files(files, config)
         rows: list[PreviewRow] = []
+        append_row = rows.append
+        preview_row = PreviewRow
+        build_final_name = RuleEngine.build_final_name
+        progress_interval = RuleEngine.PREVIEW_PROGRESS_INTERVAL
+        filter_enabled = config.filter_enabled
+        filter_exts = RuleEngine.parse_exts(config.filter_ext_text) if filter_enabled else set()
+        include_mode = config.filter_mode == '仅处理这些扩展名'
         seq_index = 0
         total = len(ordered_files)
+
         for index, item in enumerate(ordered_files, start=1):
             if should_cancel is not None and should_cancel():
                 raise OperationCancelled('预览已取消')
-            if not RuleEngine.passes_filter(item, config):
-                rows.append(PreviewRow(item=item, new_name=None, state='跳过', ext=item.ext or '-', folder=str(item.folder)))
+
+            if filter_enabled and filter_exts:
+                matched = item.ext.lower() in filter_exts
+                passes_filter = matched if include_mode else not matched
+            else:
+                passes_filter = True
+
+            if not passes_filter:
+                append_row(preview_row(item=item, new_name=None, state='跳过', ext=item.ext or '-', folder=str(item.folder)))
             else:
                 try:
                     seq_num = config.start_num + seq_index * config.step
-                    new_name = RuleEngine.build_final_name(item, seq_num, config, regex_rule)
-                    state = '待处理'
-                    if new_name == item.name:
-                        state = '跳过'
-                    rows.append(PreviewRow(item=item, new_name=new_name, state=state, ext=item.ext or '-', folder=str(item.folder)))
+                    new_name = build_final_name(item, seq_num, config, regex_rule, replace_rule)
+                    state = '跳过' if new_name == item.name else '待处理'
+                    append_row(preview_row(item=item, new_name=new_name, state=state, ext=item.ext or '-', folder=str(item.folder)))
                     seq_index += 1
                 except Exception as exc:
-                    rows.append(PreviewRow(item=item, new_name=None, state=f'错误：{exc}', ext=item.ext or '-', folder=str(item.folder)))
-            if progress is not None and (index == 1 or index == total or index % RuleEngine.PREVIEW_PROGRESS_INTERVAL == 0):
+                    append_row(preview_row(item=item, new_name=None, state=f'错误：{exc}', ext=item.ext or '-', folder=str(item.folder)))
+
+            if progress is not None and (index == 1 or index == total or index % progress_interval == 0):
                 progress(index, total, f'正在计算预览：{item.name}')
         return rows
 
     @staticmethod
     def summarize(rows: list[PreviewRow]) -> tuple[PreviewSummary, dict[str, int]]:
         target_map: dict[str, int] = {}
+        target_get = target_map.get
         for row in rows:
-            if row.new_name and row.state != '跳过':
-                target = str(row.item.folder / row.new_name).lower()
-                target_map[target] = target_map.get(target, 0) + 1
+            new_name = row.new_name
+            state = row.state
+            if new_name and state != '跳过':
+                target = str(row.item.folder / new_name).lower()
+                target_map[target] = target_get(target, 0) + 1
 
         ready = skip = duplicate = error = 0
+        target_get = target_map.get
         for row in rows:
-            if row.new_name and row.state != '跳过' and target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
-                duplicate += 1
-            elif row.state == '跳过':
+            state = row.state
+            new_name = row.new_name
+            if new_name and state != '跳过':
+                target = str(row.item.folder / new_name).lower()
+                if target_get(target, 0) > 1:
+                    duplicate += 1
+                    continue
+            if state == '跳过':
                 skip += 1
-            elif row.state.startswith('错误'):
+            elif state.startswith('错误'):
                 error += 1
             else:
                 ready += 1
