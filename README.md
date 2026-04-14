@@ -2,7 +2,7 @@
 
 一款开源的批量重命名软件，轻量，便捷，持续优化更新中。
 
-当前版本：**1.0.5**
+当前版本：**1.0.6**
 
 ## 功能特点
 
@@ -55,6 +55,7 @@ free_rename/
 ├─ ui_main.py
 ├─ rule_engine.py
 ├─ file_manager.py
+├─ workers.py
 ├─ free_rename.spec
 ├─ requirements_free_rename.txt
 ├─ run_free_rename.bat
@@ -63,6 +64,13 @@ free_rename/
 ├─ .gitignore
 └─ README.md
 ```
+
+## 1.0.6 更新内容
+1. **预览表格模型化**：预览区域由 `QTableWidget` 调整为 `QTableView + QAbstractTableModel`，大批量文件时刷新更稳、内存占用更低。
+2. **文件夹扫描后台化**：添加文件夹与递归导入改为后台扫描，扫描期间界面不再卡死。
+3. **执行复用当前预览**：开始执行时直接基于当前已显示的预览结果构建任务，不再额外同步重算一遍规则。
+4. **Worker 进一步拆分**：新增 `workers.py`，把 `PreviewWorker`、`ScanWorker`、`RenameWorker` 从界面与文件管理逻辑中分离。
+5. **打包资源补全**：PyInstaller 脚本与 spec 已补上 `styles/` 目录，深色/浅色主题在 EXE 中也能正常加载。
 
 ## 1.0.5 更新内容
 1. **工程结构拆分**：正式拆分为 `rule_engine.py`、`file_manager.py`、`ui_main.py`，主入口 `free_rename.py` 仅负责启动。

@@ -6,7 +6,6 @@ import shutil
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
 
 from rule_engine import FileItem, PreviewRow
 
@@ -192,34 +191,3 @@ class FileManager:
         result['failed'] = len(failure_messages)
         return result
 
-
-class RenameWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        tasks: list[tuple[FileItem, str]],
-        mode: str,
-        continue_on_error: bool = False,
-        pre_errors: Optional[list[str]] = None,
-    ) -> None:
-        super().__init__()
-        self.tasks = tasks
-        self.mode = mode
-        self.continue_on_error = continue_on_error
-        self.pre_errors = list(pre_errors or [])
-
-    def run(self) -> None:
-        try:
-            result = FileManager.execute(
-                self.tasks,
-                self.mode,
-                continue_on_error=self.continue_on_error,
-                progress=self.progress.emit,
-                pre_errors=self.pre_errors,
-            )
-            self.finished.emit(result)
-        except Exception as exc:
-            self.failed.emit(str(exc))

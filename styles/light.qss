@@ -180,17 +180,17 @@ QHeaderView::section {
     border-bottom: 1px solid #d9e1ea;
     font-weight: 700;
 }
-QTableWidget {
+QTableWidget, QTableView {
     background: #ffffff;
     alternate-background-color: #f8fbff;
     border: 1px solid #d9e1ea;
     border-radius: 14px;
     gridline-color: #d9e1ea;
 }
-QTableWidget::item {
+QTableWidget::item, QTableView::item {
     padding: 8px;
 }
-QTableWidget::item:selected {
+QTableWidget::item:selected, QTableView::item:selected {
     background: rgba(59,130,246,0.16);
     color: #111827;
 }

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, QObject, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -30,8 +31,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QStyle,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -39,11 +39,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from file_manager import FileManager, RenameWorker
+from file_manager import FileManager
 from rule_engine import FileItem, PreviewRow, PreviewSummary, RuleConfig, RuleEngine
+from workers import PreviewWorker, RenameWorker, ScanWorker
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350
@@ -70,7 +71,7 @@ def find_asset(candidates: list[str]) -> Optional[Path]:
                 return path
     return None
 
-class DropTable(QTableWidget):
+class DropTable(QTableView):
     filesDropped = Signal(list)
 
     def __init__(self) -> None:
@@ -102,6 +103,66 @@ class DropTable(QTableWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+
+class PreviewTableModel(QAbstractTableModel):
+    headers = ["原文件名", "预览新文件名", "状态", "扩展名", "所在目录"]
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._rows: list[PreviewRow] = []
+        self._target_map: dict[str, int] = {}
+
+    def update_data(self, rows: list[PreviewRow], target_map: dict[str, int]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows)
+        self._target_map = dict(target_map)
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self.headers)
+
+    def _display_state(self, row: PreviewRow) -> str:
+        if row.new_name and self._target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
+            return "重名冲突"
+        return row.state
+
+    def data(self, index: QModelIndex, role: int = int(Qt.ItemDataRole.DisplayRole)):
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        row = self._rows[index.row()]
+        state = self._display_state(row)
+        values = [row.item.name, row.new_name or "-", state, row.ext, row.folder]
+
+        if role == int(Qt.ItemDataRole.DisplayRole):
+            return values[index.column()]
+
+        if role == int(Qt.ItemDataRole.BackgroundRole):
+            if state == "重名冲突":
+                return QColor("#fee2e2")
+            if state.startswith("错误"):
+                return QColor("#ffedd5")
+            if state == "跳过":
+                return QColor("#f3f4f6")
+
+        if role == int(Qt.ItemDataRole.ToolTipRole):
+            return values[index.column()]
+
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = int(Qt.ItemDataRole.DisplayRole)):
+        if role != int(Qt.ItemDataRole.DisplayRole):
+            return None
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self.headers):
+            return self.headers[section]
+        return super().headerData(section, orientation, role)
 
 
 class SidebarButton(QPushButton):
@@ -147,24 +208,6 @@ class StatCard(QFrame):
 
     def set_value(self, value: str) -> None:
         self.value_label.setText(value)
-
-
-class PreviewWorker(QObject):
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, files: list[FileItem], config: RuleConfig) -> None:
-        super().__init__()
-        self.files = list(files)
-        self.config = config
-
-    def run(self) -> None:
-        try:
-            rows = RuleEngine.generate_preview(self.files, self.config)
-            self.finished.emit(rows)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
 
 
 def build_embedded_stylesheet(theme: str) -> str:
@@ -375,17 +418,17 @@ def build_embedded_stylesheet(theme: str) -> str:
         border-bottom: 1px solid {border};
         font-weight: 700;
     }}
-    QTableWidget {{
+    QTableWidget, QTableView {{
         background: {card};
         alternate-background-color: {table_alt};
         border: 1px solid {border};
         border-radius: 14px;
         gridline-color: {border};
     }}
-    QTableWidget::item {{
+    QTableWidget::item, QTableView::item {{
         padding: 8px;
     }}
-    QTableWidget::item:selected {{
+    QTableWidget::item:selected, QTableView::item:selected {{
         background: rgba(59,130,246,0.16);
         color: {text};
     }}
@@ -419,6 +462,7 @@ class RenamerWindow(QMainWindow):
         self.history: list[str] = []
         self.current_theme = "light"
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self.preview_model = PreviewTableModel(self)
         self.last_dir = self.settings.value("paths/last_dir", str(Path.home()), type=str) or str(Path.home())
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
@@ -430,6 +474,8 @@ class RenamerWindow(QMainWindow):
         self._preview_pending_show_errors = False
         self._preview_thread: Optional[QThread] = None
         self._preview_worker: Optional[PreviewWorker] = None
+        self._scan_thread: Optional[QThread] = None
+        self._scan_worker: Optional[ScanWorker] = None
         self._execute_thread: Optional[QThread] = None
         self._execute_worker: Optional[RenameWorker] = None
         self._build_window()
@@ -551,6 +597,10 @@ class RenamerWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self._execute_thread is not None:
             QMessageBox.information(self, APP_TITLE, "当前仍有任务在执行，请等待完成后再关闭窗口。")
+            event.ignore()
+            return
+        if self._scan_thread is not None or self._preview_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前仍有后台任务在运行，请稍后再关闭窗口。")
             event.ignore()
             return
         self._save_ui_settings()
@@ -694,6 +744,7 @@ class RenamerWindow(QMainWindow):
         qt = QLabel("快速操作")
         qt.setObjectName("CardTitle")
         ql.addWidget(qt)
+        self.home_action_buttons: list[QPushButton] = []
         for text, cb in [
             ("➕ 添加文件", self.add_files),
             ("📁 添加文件夹", self.add_folder),
@@ -703,6 +754,8 @@ class RenamerWindow(QMainWindow):
             btn = QPushButton(text)
             btn.clicked.connect(cb)
             ql.addWidget(btn)
+            if text != "🚀 转到批量重命名":
+                self.home_action_buttons.append(btn)
         ql.addStretch(1)
 
         info = QFrame()
@@ -741,31 +794,56 @@ class RenamerWindow(QMainWindow):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(10)
-        for text, cb in [
-            ("➕ 添加文件", self.add_files),
-            ("📁 文件夹", self.add_folder),
-            ("🔁 递归", self.add_folder_recursive),
-            ("🗑 移除", self.remove_selected),
-            ("🧹 清空", self.clear_files),
-            ("⬆ 上移", lambda: self.move_selected(-1)),
-            ("⬇ 下移", lambda: self.move_selected(1)),
-        ]:
-            btn = QPushButton(text)
-            btn.clicked.connect(cb)
-            toolbar.addWidget(btn)
+        self.file_action_buttons: list[QPushButton] = []
+        self.add_files_btn = QPushButton("➕ 添加文件")
+        self.add_files_btn.clicked.connect(self.add_files)
+        self.file_action_buttons.append(self.add_files_btn)
+        toolbar.addWidget(self.add_files_btn)
+
+        self.add_folder_btn = QPushButton("📁 文件夹")
+        self.add_folder_btn.clicked.connect(self.add_folder)
+        self.file_action_buttons.append(self.add_folder_btn)
+        toolbar.addWidget(self.add_folder_btn)
+
+        self.add_recursive_btn = QPushButton("🔁 递归")
+        self.add_recursive_btn.clicked.connect(self.add_folder_recursive)
+        self.file_action_buttons.append(self.add_recursive_btn)
+        toolbar.addWidget(self.add_recursive_btn)
+
+        self.remove_btn = QPushButton("🗑 移除")
+        self.remove_btn.clicked.connect(self.remove_selected)
+        self.file_action_buttons.append(self.remove_btn)
+        toolbar.addWidget(self.remove_btn)
+
+        self.clear_btn = QPushButton("🧹 清空")
+        self.clear_btn.clicked.connect(self.clear_files)
+        self.file_action_buttons.append(self.clear_btn)
+        toolbar.addWidget(self.clear_btn)
+
+        self.move_up_btn = QPushButton("⬆ 上移")
+        self.move_up_btn.clicked.connect(lambda: self.move_selected(-1))
+        self.file_action_buttons.append(self.move_up_btn)
+        toolbar.addWidget(self.move_up_btn)
+
+        self.move_down_btn = QPushButton("⬇ 下移")
+        self.move_down_btn.clicked.connect(lambda: self.move_selected(1))
+        self.file_action_buttons.append(self.move_down_btn)
+        toolbar.addWidget(self.move_down_btn)
+
         toolbar.addStretch(1)
         left_layout.addLayout(toolbar)
 
         self.table = DropTable()
         self.table.filesDropped.connect(self.on_files_dropped)
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["原文件名", "预览新文件名", "状态", "扩展名", "所在目录"])
-        self.table.verticalHeader().setVisible(False)
+        self.table.setModel(self.preview_model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(False)
+        self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setMinimumWidth(620)
         left_layout.addWidget(self.table, 1)
 
@@ -1178,20 +1256,40 @@ class RenamerWindow(QMainWindow):
         self._preview_thread.finished.connect(self._cleanup_preview_thread)
         self._preview_thread.start()
 
+    def _update_interaction_state(self) -> None:
+        preview_busy = self._preview_thread is not None
+        scan_busy = self._scan_thread is not None
+        execute_busy = self._execute_thread is not None
+        any_busy = preview_busy or scan_busy or execute_busy
+
+        self.refresh_btn.setEnabled(not scan_busy and not execute_busy and not preview_busy)
+        self.execute_btn.setEnabled(not any_busy and not self._preview_dirty and bool(self.preview_rows))
+        self.export_btn.setEnabled(not any_busy and bool(self.preview_rows))
+
+        if hasattr(self, 'file_action_buttons'):
+            for button in self.file_action_buttons:
+                button.setEnabled(not any_busy)
+        if hasattr(self, 'home_action_buttons'):
+            for button in self.home_action_buttons:
+                button.setEnabled(not any_busy)
+
+        self.tabs.setEnabled(not scan_busy and not execute_busy)
+        self.table.setEnabled(not scan_busy and not execute_busy)
+        self.rename_mode_radio.setEnabled(not scan_busy and not execute_busy)
+        self.copy_mode_radio.setEnabled(not scan_busy and not execute_busy)
+        self.continue_on_error_check.setEnabled(not scan_busy and not execute_busy)
+
     def _set_preview_busy(self, busy: bool) -> None:
-        self.refresh_btn.setEnabled(not busy and self._execute_thread is None)
-        self.execute_btn.setEnabled(not busy and self._execute_thread is None)
-        self.export_btn.setEnabled(not busy and self._execute_thread is None and bool(self.preview_rows))
+        _ = busy
+        self._update_interaction_state()
 
     def _set_execute_busy(self, busy: bool) -> None:
-        self.execute_btn.setEnabled(not busy and self._preview_thread is None)
-        self.refresh_btn.setEnabled(not busy and self._preview_thread is None)
-        self.export_btn.setEnabled(not busy and self._preview_thread is None)
-        self.tabs.setEnabled(not busy)
-        self.table.setEnabled(not busy)
-        self.rename_mode_radio.setEnabled(not busy)
-        self.copy_mode_radio.setEnabled(not busy)
-        self.continue_on_error_check.setEnabled(not busy)
+        _ = busy
+        self._update_interaction_state()
+
+    def _set_scan_busy(self, busy: bool) -> None:
+        _ = busy
+        self._update_interaction_state()
 
     def _on_preview_finished(self, result: object) -> None:
         rows = result if isinstance(result, list) else []
@@ -1225,13 +1323,74 @@ class RenamerWindow(QMainWindow):
         self._preview_worker = None
         self._preview_thread = None
         self._set_preview_busy(False)
-        if self._preview_pending and self._execute_thread is None:
+        if self._preview_pending and self._execute_thread is None and self._scan_thread is None:
             show_errors = self._preview_pending_show_errors
             self._preview_pending = False
             self._preview_pending_show_errors = False
             QTimer.singleShot(0, lambda: self._start_preview(show_errors=show_errors))
 
+    def _start_scan(self, paths: list[str], recursive: bool, label: str) -> None:
+        if not paths:
+            return
+        if self._scan_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前仍有扫描任务在进行中，请稍后再试。")
+            return
+        if self._preview_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "预览仍在刷新，请稍后再扫描文件夹。")
+            return
+        self._set_scan_busy(True)
+        self.progress_bar.setRange(0, 0)
+        self.progress_label.setText(f"正在后台扫描{label}…")
+        self.status.showMessage(f"正在后台扫描{label}…")
+
+        self._scan_thread = QThread(self)
+        self._scan_worker = ScanWorker(paths, recursive=recursive)
+        self._scan_worker.moveToThread(self._scan_thread)
+        self._scan_thread.started.connect(self._scan_worker.run)
+        self._scan_worker.progress.connect(self._on_scan_progress)
+        self._scan_worker.finished.connect(self._on_scan_finished)
+        self._scan_worker.finished.connect(self._scan_thread.quit)
+        self._scan_worker.failed.connect(self._on_scan_failed)
+        self._scan_worker.failed.connect(self._scan_thread.quit)
+        self._scan_thread.finished.connect(self._cleanup_scan_thread)
+        self._scan_thread.start()
+
+    def _on_scan_progress(self, count: int, message: str) -> None:
+        suffix = f"（已发现 {count} 个文件）" if count > 0 else ""
+        self.progress_label.setText(f"{message}{suffix}")
+        self.status.showMessage(f"{message}{suffix}")
+
+    def _on_scan_finished(self, result: object) -> None:
+        paths = [str(p) for p in result] if isinstance(result, list) else []
+        self._append_paths(paths, trigger_preview=False)
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("")
+        self.progress_label.setText(f"扫描完成，新增候选 {len(paths)} 项")
+        self.status.showMessage(f"扫描完成，找到 {len(paths)} 个文件")
+        self.refresh_preview(show_errors=False)
+
+    def _on_scan_failed(self, error_text: str) -> None:
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("")
+        self.progress_label.setText(f"扫描失败：{error_text}")
+        self.status.showMessage(f"扫描失败：{error_text}")
+        QMessageBox.critical(self, APP_TITLE, f"扫描失败：{error_text}")
+
+    def _cleanup_scan_thread(self) -> None:
+        if self._scan_worker is not None:
+            self._scan_worker.deleteLater()
+        if self._scan_thread is not None:
+            self._scan_thread.deleteLater()
+        self._scan_worker = None
+        self._scan_thread = None
+        self._set_scan_busy(False)
+
     def add_files(self) -> None:
+        if self._scan_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前仍有扫描任务在进行中，请稍后再试。")
+            return
         paths, _ = QFileDialog.getOpenFileNames(self, "选择文件", self._dialog_start_dir())
         if paths:
             self._remember_path(paths[0])
@@ -1241,27 +1400,24 @@ class RenamerWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹", self._dialog_start_dir())
         if folder:
             self._remember_path(folder)
-            entries = [str(Path(folder) / name) for name in os.listdir(folder) if (Path(folder) / name).is_file()]
-            self._append_paths(entries)
+            self._start_scan([folder], recursive=False, label="文件夹")
 
     def add_folder_recursive(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹（递归添加）", self._dialog_start_dir())
         if folder:
             self._remember_path(folder)
-            entries = [str(p) for p in Path(folder).rglob("*") if p.is_file()]
-            self._append_paths(entries)
+            self._start_scan([folder], recursive=True, label="文件夹（递归）")
 
     def on_files_dropped(self, paths: list[str]) -> None:
-        expanded: list[str] = []
-        for raw in paths:
-            p = Path(raw)
-            if p.is_dir():
-                expanded.extend([str(x) for x in p.iterdir() if x.is_file()])
-            elif p.is_file():
-                expanded.append(str(p))
-        self._append_paths(expanded)
+        if self._scan_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前仍有扫描任务在进行中，请稍后再试。")
+            return
+        if any(Path(raw).is_dir() for raw in paths):
+            self._start_scan(paths, recursive=False, label="拖拽目录")
+            return
+        self._append_paths(paths)
 
-    def _append_paths(self, paths: list[str]) -> None:
+    def _append_paths(self, paths: list[str], trigger_preview: bool = True) -> None:
         existing = {str(item.path).lower() for item in self.files}
         added = 0
         for raw in paths:
@@ -1274,7 +1430,11 @@ class RenamerWindow(QMainWindow):
             self._remember_path(paths[0])
         self.status.showMessage(f"已添加 {added} 个文件")
         self.history.append(f"添加文件：{added} 个")
-        self.refresh_preview(show_errors=False)
+        self._refresh_history_panel()
+        if trigger_preview:
+            self.refresh_preview(show_errors=False)
+        else:
+            self.file_count_label.setText(f"{len(self.files)} 个文件")
 
     def remove_selected(self) -> None:
         rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
@@ -1308,32 +1468,12 @@ class RenamerWindow(QMainWindow):
         self.table.selectRow(new_row)
 
     def _render_preview(self) -> None:
-        self.table.setRowCount(0)
+        self.preview_model.update_data(self.preview_rows, self.preview_target_map)
         if not self.preview_rows:
             self.status.showMessage("请选择文件、文件夹，或直接拖入窗口")
             self.home_info.setPlainText("还没有导入文件。\n\n你可以从左侧工作区进入‘批量重命名’，也可以在首页快速添加文件。")
-            self.export_btn.setEnabled(False if self._execute_thread is None else False)
+            self._update_interaction_state()
             return
-
-        self.table.setRowCount(len(self.preview_rows))
-        for row_idx, row in enumerate(self.preview_rows):
-            show_name = row.new_name or "-"
-            state = row.state
-            bg = None
-            if row.new_name and self.preview_target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
-                state = "重名冲突"
-                bg = QColor("#fee2e2")
-            elif row.state.startswith("错误"):
-                bg = QColor("#ffedd5")
-            elif row.state == "跳过":
-                bg = QColor("#f3f4f6")
-
-            values = [row.item.name, show_name, state, row.ext, row.folder]
-            for col, value in enumerate(values):
-                cell = QTableWidgetItem(value)
-                if bg:
-                    cell.setBackground(bg)
-                self.table.setItem(row_idx, col, cell)
 
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -1344,10 +1484,9 @@ class RenamerWindow(QMainWindow):
             f"跳过：{self.preview_summary.skip}\n"
             f"重名冲突：{self.preview_summary.duplicate}\n"
             f"错误：{self.preview_summary.error}\n\n"
-            "当前版本已将预览计算移到后台线程，并把规则计算逻辑从窗口类中拆分出来。"
+            "当前版本已改为 QTableView + Model 预览模式，并将文件夹扫描移入后台线程。"
         )
-        if self._execute_thread is None and self._preview_thread is None:
-            self.export_btn.setEnabled(True)
+        self._update_interaction_state()
 
     def _update_home_stats(self) -> None:
         self.card_total.set_value(str(self.preview_summary.total))
@@ -1361,15 +1500,17 @@ class RenamerWindow(QMainWindow):
             self.history_list.addItem(text)
 
     def _build_tasks_from_current_rules(self) -> tuple[list[tuple[FileItem, str]], list[str]]:
-        config = self._build_rule_config()
-        rows = RuleEngine.generate_preview(self.files, config)
-        _, target_map = RuleEngine.summarize(rows)
+        if self._preview_thread is not None or self._preview_dirty:
+            raise ValueError("预览尚未刷新完成，请等待当前预览更新后再执行。")
+        if not self.preview_rows:
+            raise ValueError("没有可执行的文件")
+
         todo: list[tuple[FileItem, str]] = []
         pre_errors: list[str] = []
         seen: set[str] = set()
         tolerate = self.continue_on_error_check.isChecked()
 
-        for row in rows:
+        for row in self.preview_rows:
             if row.state == "跳过":
                 continue
             if not row.new_name:
@@ -1380,7 +1521,7 @@ class RenamerWindow(QMainWindow):
                 raise ValueError(message)
 
             target = str(row.item.folder / row.new_name).lower()
-            if target_map.get(target, 0) > 1 or target in seen:
+            if self.preview_target_map.get(target, 0) > 1 or target in seen:
                 message = f"{row.item.name}：重名冲突 -> {row.new_name}"
                 if tolerate:
                     pre_errors.append(message)
@@ -1400,8 +1541,11 @@ class RenamerWindow(QMainWindow):
         if self._execute_thread is not None:
             QMessageBox.information(self, APP_TITLE, "当前任务仍在执行中，请稍后。")
             return
-        if self._preview_thread is not None:
-            QMessageBox.information(self, APP_TITLE, "预览仍在计算中，请稍后再执行。")
+        if self._scan_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "文件夹扫描仍在进行中，请稍后再执行。")
+            return
+        if self._preview_thread is not None or self._preview_dirty:
+            QMessageBox.information(self, APP_TITLE, "预览仍在计算或尚未刷新完成，请稍后再执行。")
             return
 
         try:

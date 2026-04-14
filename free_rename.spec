@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\Users\\sexer\\Desktop\\豆瓣工具\\批量重命名\\free_rename_v1.0_github\\free_rename.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
+    datas=[('assets', 'assets'), ('styles', 'styles')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

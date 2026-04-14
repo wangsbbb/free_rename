@@ -181,17 +181,17 @@ QHeaderView::section {
     border-bottom: 1px solid #2a3447;
     font-weight: 700;
 }
-QTableWidget {
+QTableWidget, QTableView {
     background: #172033;
     alternate-background-color: #132033;
     border: 1px solid #2a3447;
     border-radius: 14px;
     gridline-color: #2a3447;
 }
-QTableWidget::item {
+QTableWidget::item, QTableView::item {
     padding: 8px;
 }
-QTableWidget::item:selected {
+QTableWidget::item:selected, QTableView::item:selected {
     background: rgba(59,130,246,0.16);
     color: #e5e7eb;
 }

@@ -7,11 +7,11 @@ set "ROOT=%~dp0"
 cd /d "%ROOT%"
 set "LOG=%ROOT%build_free_rename_log.txt"
 
-echo [INFO] free_rename v1.0 onefile build > "%LOG%"
+echo [INFO] free_rename v1.0.6 onefile build > "%LOG%"
 echo [INFO] Working dir: %ROOT%>> "%LOG%"
 
 echo.
-echo === free_rename v1.0 onefile build ===
+echo === free_rename v1.0.6 onefile build ===
 echo.
 
 if not exist "%ROOT%free_rename.py" (
@@ -67,7 +67,7 @@ if exist "%ROOT%dist" rmdir /s /q "%ROOT%dist"
 echo [INFO] Running PyInstaller...
 echo [INFO] Running PyInstaller...>> "%LOG%"
 
-set "PYI_CMD=%PYTHON_EXE% -m PyInstaller --noconfirm --clean --windowed --onefile --name free_rename --add-data assets;assets"
+set "PYI_CMD=%PYTHON_EXE% -m PyInstaller --noconfirm --clean --windowed --onefile --name free_rename --add-data assets;assets --add-data styles;styles"
 if exist "%ICON_FILE%" set "PYI_CMD=!PYI_CMD! --icon "%ICON_FILE%""
 if exist "%VERSION_FILE%" set "PYI_CMD=!PYI_CMD! --version-file "%VERSION_FILE%""
 set "PYI_CMD=!PYI_CMD! "%ROOT%free_rename.py""
