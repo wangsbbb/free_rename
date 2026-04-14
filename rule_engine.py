@@ -3,10 +3,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 INVALID_CHARS = set('\\/:*?"<>|')
 MAX_SAFE_PATH_LEN = 240
+class OperationCancelled(Exception):
+    """Raised when a background operation is cancelled by the user."""
+
+
 WINDOWS_RESERVED_NAMES = {
     'CON', 'PRN', 'AUX', 'NUL',
     'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
@@ -212,11 +216,17 @@ class RuleEngine:
         return final_name
 
     @staticmethod
-    def generate_preview(files: list[FileItem], config: RuleConfig) -> list[PreviewRow]:
+    def generate_preview(
+        files: list[FileItem],
+        config: RuleConfig,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> list[PreviewRow]:
         regex_rule = RuleEngine.get_compiled_regex(config)
         rows: list[PreviewRow] = []
         seq_index = 0
         for item in files:
+            if should_cancel is not None and should_cancel():
+                raise OperationCancelled('预览已取消')
             if not RuleEngine.passes_filter(item, config):
                 rows.append(PreviewRow(item=item, new_name=None, state='跳过', ext=item.ext or '-', folder=str(item.folder)))
                 continue

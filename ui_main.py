@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -44,7 +45,7 @@ from rule_engine import FileItem, PreviewRow, PreviewSummary, RuleConfig, RuleEn
 from workers import PreviewWorker, RenameWorker, ScanWorker
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350
@@ -462,6 +463,7 @@ class RenamerWindow(QMainWindow):
         self.history: list[str] = []
         self.current_theme = "light"
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self.history_file = self._history_file_path()
         self.preview_model = PreviewTableModel(self)
         self.last_dir = self.settings.value("paths/last_dir", str(Path.home()), type=str) or str(Path.home())
         self.preview_timer = QTimer(self)
@@ -478,7 +480,9 @@ class RenamerWindow(QMainWindow):
         self._scan_worker: Optional[ScanWorker] = None
         self._execute_thread: Optional[QThread] = None
         self._execute_worker: Optional[RenameWorker] = None
+        self._cancel_requested = False
         self._build_window()
+        self._load_history()
         self._restore_ui_settings()
         self._apply_icon()
         self.refresh_preview(show_errors=False)
@@ -504,6 +508,40 @@ class RenamerWindow(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "请先在 free_rename.py 中把 PROJECT_URL 改成你的 GitHub 仓库地址。")
             return
         QDesktopServices.openUrl(QUrl(PROJECT_URL))
+
+    def _app_data_dir(self) -> Path:
+        raw = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        base = Path(raw) if raw else (Path.home() / f'.{APP_NAME}')
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    def _history_file_path(self) -> Path:
+        return self._app_data_dir() / 'history.log'
+
+    def _history_timestamp(self) -> str:
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    def _load_history(self) -> None:
+        try:
+            if self.history_file.exists():
+                lines = [line for line in self.history_file.read_text(encoding='utf-8').splitlines() if line.strip()]
+                self.history = lines[-500:]
+        except Exception:
+            self.history = []
+        self._refresh_history_panel()
+
+    def _add_history(self, message: str, refresh: bool = True) -> None:
+        entry = f'[{self._history_timestamp()}] {message}'
+        self.history.append(entry)
+        self.history = self.history[-500:]
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_file.open('a', encoding='utf-8') as f:
+                f.write(entry + '\n')
+        except Exception:
+            pass
+        if refresh:
+            self._refresh_history_panel()
 
     def _restore_ui_settings(self) -> None:
         theme = self.settings.value("ui/theme", "light", type=str) or "light"
@@ -595,12 +633,8 @@ class RenamerWindow(QMainWindow):
         self.settings.setValue("rules/filter_mode", self.filter_mode_combo.currentText())
 
     def closeEvent(self, event) -> None:
-        if self._execute_thread is not None:
-            QMessageBox.information(self, APP_TITLE, "当前仍有任务在执行，请等待完成后再关闭窗口。")
-            event.ignore()
-            return
-        if self._scan_thread is not None or self._preview_thread is not None:
-            QMessageBox.information(self, APP_TITLE, "当前仍有后台任务在运行，请稍后再关闭窗口。")
+        if self._execute_thread is not None or self._scan_thread is not None or self._preview_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "当前仍有后台任务在运行，可先点击“取消任务”，待任务结束后再关闭窗口。")
             event.ignore()
             return
         self._save_ui_settings()
@@ -1096,13 +1130,16 @@ class RenamerWindow(QMainWindow):
         self.refresh_btn = QPushButton("刷新预览")
         self.export_btn = QPushButton("导出当前列表")
         self.execute_btn = QPushButton("开始重命名")
+        self.cancel_btn = QPushButton("取消任务")
         self.execute_btn.setObjectName("PrimaryButton")
         self.refresh_btn.clicked.connect(lambda: self.refresh_preview(show_errors=True))
         self.export_btn.clicked.connect(self.export_list)
         self.execute_btn.clicked.connect(self.execute)
+        self.cancel_btn.clicked.connect(self.cancel_current_task)
         btn_row.addWidget(self.refresh_btn)
         btn_row.addWidget(self.export_btn)
         btn_row.addWidget(self.execute_btn)
+        btn_row.addWidget(self.cancel_btn)
         layout.addLayout(btn_row)
 
         self.progress_label = QLabel("空闲")
@@ -1115,6 +1152,36 @@ class RenamerWindow(QMainWindow):
         layout.addWidget(self.progress_label)
         layout.addWidget(self.progress_bar)
         return box
+
+    def cancel_current_task(self) -> None:
+        if self._execute_worker is not None:
+            self._cancel_requested = True
+            self._execute_worker.stop()
+            self.progress_label.setText('已请求取消执行任务，正在安全收尾…')
+            self.status.showMessage('已请求取消执行任务，正在安全收尾…')
+            self._add_history('请求取消执行任务')
+            self._update_interaction_state()
+            return
+        if self._scan_worker is not None:
+            self._cancel_requested = True
+            self._scan_worker.stop()
+            self.progress_label.setText('已请求取消扫描任务，正在收尾…')
+            self.status.showMessage('已请求取消扫描任务，正在收尾…')
+            self._add_history('请求取消扫描任务')
+            self._update_interaction_state()
+            return
+        if self._preview_worker is not None:
+            self._cancel_requested = True
+            self._preview_pending = False
+            self._preview_pending_show_errors = False
+            self._preview_dirty = True
+            self._preview_worker.stop()
+            self.progress_label.setText('已请求取消预览任务，正在收尾…')
+            self.status.showMessage('已请求取消预览任务，正在收尾…')
+            self._add_history('请求取消预览任务')
+            self._update_interaction_state()
+            return
+        QMessageBox.information(self, APP_TITLE, '当前没有正在运行的后台任务。')
 
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -1265,6 +1332,7 @@ class RenamerWindow(QMainWindow):
         self.refresh_btn.setEnabled(not scan_busy and not execute_busy and not preview_busy)
         self.execute_btn.setEnabled(not any_busy and not self._preview_dirty and bool(self.preview_rows))
         self.export_btn.setEnabled(not any_busy and bool(self.preview_rows))
+        self.cancel_btn.setEnabled(any_busy and not self._cancel_requested)
 
         if hasattr(self, 'file_action_buttons'):
             for button in self.file_action_buttons:
@@ -1292,7 +1360,14 @@ class RenamerWindow(QMainWindow):
         self._update_interaction_state()
 
     def _on_preview_finished(self, result: object) -> None:
-        rows = result if isinstance(result, list) else []
+        data = result if isinstance(result, dict) else {}
+        if data.get('cancelled'):
+            self._preview_dirty = True
+            self.progress_label.setText('预览已取消')
+            self.status.showMessage('预览已取消')
+            self._set_preview_busy(False)
+            return
+        rows = data.get('rows', []) if isinstance(data, dict) else []
         normalized_rows = [row for row in rows if isinstance(row, PreviewRow)]
         self.preview_rows = normalized_rows
         self.preview_summary, self.preview_target_map = RuleEngine.summarize(self.preview_rows)
@@ -1322,6 +1397,7 @@ class RenamerWindow(QMainWindow):
             self._preview_thread.deleteLater()
         self._preview_worker = None
         self._preview_thread = None
+        self._cancel_requested = False
         self._set_preview_busy(False)
         if self._preview_pending and self._execute_thread is None and self._scan_thread is None:
             show_errors = self._preview_pending_show_errors
@@ -1338,6 +1414,7 @@ class RenamerWindow(QMainWindow):
         if self._preview_thread is not None:
             QMessageBox.information(self, APP_TITLE, "预览仍在刷新，请稍后再扫描文件夹。")
             return
+        self._cancel_requested = False
         self._set_scan_busy(True)
         self.progress_bar.setRange(0, 0)
         self.progress_label.setText(f"正在后台扫描{label}…")
@@ -1361,13 +1438,19 @@ class RenamerWindow(QMainWindow):
         self.status.showMessage(f"{message}{suffix}")
 
     def _on_scan_finished(self, result: object) -> None:
-        paths = [str(p) for p in result] if isinstance(result, list) else []
+        data = result if isinstance(result, dict) else {}
+        paths = [str(p) for p in data.get('paths', [])] if isinstance(data, dict) else []
+        cancelled = bool(data.get('cancelled', False)) if isinstance(data, dict) else False
         self._append_paths(paths, trigger_preview=False)
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("")
-        self.progress_label.setText(f"扫描完成，新增候选 {len(paths)} 项")
-        self.status.showMessage(f"扫描完成，找到 {len(paths)} 个文件")
+        if cancelled:
+            self.progress_label.setText(f"扫描已取消，已发现 {len(paths)} 项")
+            self.status.showMessage(f"扫描已取消，已发现 {len(paths)} 个文件")
+        else:
+            self.progress_label.setText(f"扫描完成，新增候选 {len(paths)} 项")
+            self.status.showMessage(f"扫描完成，找到 {len(paths)} 个文件")
         self.refresh_preview(show_errors=False)
 
     def _on_scan_failed(self, error_text: str) -> None:
@@ -1385,6 +1468,7 @@ class RenamerWindow(QMainWindow):
             self._scan_thread.deleteLater()
         self._scan_worker = None
         self._scan_thread = None
+        self._cancel_requested = False
         self._set_scan_busy(False)
 
     def add_files(self) -> None:
@@ -1429,8 +1513,7 @@ class RenamerWindow(QMainWindow):
         if paths:
             self._remember_path(paths[0])
         self.status.showMessage(f"已添加 {added} 个文件")
-        self.history.append(f"添加文件：{added} 个")
-        self._refresh_history_panel()
+        self._add_history(f"添加文件：{added} 个")
         if trigger_preview:
             self.refresh_preview(show_errors=False)
         else:
@@ -1443,7 +1526,7 @@ class RenamerWindow(QMainWindow):
         for row in rows:
             if 0 <= row < len(self.files):
                 del self.files[row]
-        self.history.append(f"移除文件：{len(rows)} 个")
+        self._add_history(f"移除文件：{len(rows)} 个")
         self.refresh_preview()
 
     def clear_files(self) -> None:
@@ -1451,7 +1534,7 @@ class RenamerWindow(QMainWindow):
         self.preview_rows.clear()
         self.preview_summary = PreviewSummary(0, 0, 0, 0, 0)
         self.preview_target_map.clear()
-        self.history.append("清空列表")
+        self._add_history("清空列表")
         self.refresh_preview(show_errors=False)
 
     def move_selected(self, delta: int) -> None:
@@ -1570,8 +1653,8 @@ class RenamerWindow(QMainWindow):
         else:
             self.progress_label.setText("任务已开始，正在后台处理…")
         self.status.showMessage(f"开始执行：{len(tasks)} 个文件，模式={mode_text}")
-        self.history.append(f"开始执行：{len(tasks)} 个文件，模式={mode_text}，容错={'开' if continue_on_error else '关'}")
-        self._refresh_history_panel()
+        self._add_history(f"开始执行：{len(tasks)} 个文件，模式={mode_text}，容错={'开' if continue_on_error else '关'}")
+        self._cancel_requested = False
         self._set_execute_busy(True)
 
         self._execute_thread = QThread(self)
@@ -1608,24 +1691,33 @@ class RenamerWindow(QMainWindow):
         mode_text = "另存为副本" if mode == "copy" else "覆盖原文件"
         failure_messages = data.get("failure_messages", [])
         continue_on_error = bool(data.get("continue_on_error", False))
+        cancelled = bool(data.get("cancelled", False))
 
         self._set_execute_busy(False)
         self.progress_bar.setValue(self.progress_bar.maximum())
         self.progress_bar.setFormat(f"{self.progress_bar.maximum()}/{self.progress_bar.maximum()}")
 
-        if continue_on_error and total_failed > 0:
-            self.history.append(f"执行完成：成功 {completed}，失败/跳过 {total_failed}，模式={mode_text}")
+        if cancelled:
+            self._add_history(f"执行已取消：已完成 {completed} 个文件，失败/跳过 {total_failed}，模式={mode_text}")
+            self.progress_label.setText(f"执行已取消：已完成 {completed}，失败/跳过 {total_failed}")
+            self.status.showMessage(f"执行已取消：已完成 {completed}，失败/跳过 {total_failed}")
+        elif continue_on_error and total_failed > 0:
+            self._add_history(f"执行完成：成功 {completed}，失败/跳过 {total_failed}，模式={mode_text}")
             self.progress_label.setText(f"处理完成：成功 {completed}，失败/跳过 {total_failed}")
             self.status.showMessage(f"处理完成：成功 {completed}，失败/跳过 {total_failed}")
         else:
-            self.history.append(f"执行完成：{completed} 个文件，模式={mode_text}")
+            self._add_history(f"执行完成：{completed} 个文件，模式={mode_text}")
             self.progress_label.setText(f"处理完成：{completed} 个文件")
             self.status.showMessage(f"处理完成，共 {completed} 个文件。")
 
-        self._refresh_history_panel()
         self.refresh_preview(show_errors=False)
 
-        if continue_on_error and total_failed > 0:
+        if cancelled:
+            preview_lines = [f"已完成：{completed} 项", f"失败/跳过：{total_failed} 项"]
+            if pre_failed > 0:
+                preview_lines.insert(0, f"预检查跳过：{pre_failed} 项")
+            QMessageBox.information(self, APP_TITLE, "\n".join(["任务已取消。", *preview_lines]))
+        elif continue_on_error and total_failed > 0:
             preview_lines = []
             if pre_failed > 0:
                 preview_lines.append(f"预检查跳过：{pre_failed} 项")
@@ -1646,8 +1738,7 @@ class RenamerWindow(QMainWindow):
         self._set_execute_busy(False)
         self.progress_label.setText(f"处理失败：{error_text}")
         self.status.showMessage(f"处理失败：{error_text}")
-        self.history.append(f"执行失败：{error_text}")
-        self._refresh_history_panel()
+        self._add_history(f"执行失败：{error_text}")
         self.refresh_preview(show_errors=False)
         QMessageBox.critical(self, APP_TITLE, f"处理失败：{error_text}")
 
@@ -1658,6 +1749,7 @@ class RenamerWindow(QMainWindow):
             self._execute_thread.deleteLater()
         self._execute_worker = None
         self._execute_thread = None
+        self._cancel_requested = False
         self._set_execute_busy(False)
 
     def export_list(self) -> None:
@@ -1674,8 +1766,7 @@ class RenamerWindow(QMainWindow):
         try:
             FileManager.export_preview(self.preview_rows, self.preview_target_map, Path(save_path))
             QMessageBox.information(self, APP_TITLE, "导出完成。")
-            self.history.append(f"导出列表：{save_path}")
-            self._refresh_history_panel()
+            self._add_history(f"导出列表：{save_path}")
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"导出失败：{exc}")
 

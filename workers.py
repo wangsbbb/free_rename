@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from file_manager import FileManager
-from rule_engine import FileItem, RuleConfig, RuleEngine
+from rule_engine import FileItem, OperationCancelled, RuleConfig, RuleEngine
 
 
 class PreviewWorker(QObject):
@@ -16,11 +16,20 @@ class PreviewWorker(QObject):
         super().__init__()
         self.files = list(files)
         self.config = config
+        self._cancel_requested = False
+
+    def stop(self) -> None:
+        self._cancel_requested = True
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel_requested
 
     def run(self) -> None:
         try:
-            rows = RuleEngine.generate_preview(self.files, self.config)
-            self.finished.emit(rows)
+            rows = RuleEngine.generate_preview(self.files, self.config, should_cancel=self.is_cancel_requested)
+            self.finished.emit({'rows': rows, 'cancelled': False})
+        except OperationCancelled:
+            self.finished.emit({'rows': None, 'cancelled': True})
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -34,6 +43,13 @@ class ScanWorker(QObject):
         super().__init__()
         self.paths = list(paths)
         self.recursive = recursive
+        self._cancel_requested = False
+
+    def stop(self) -> None:
+        self._cancel_requested = True
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel_requested
 
     def _emit_progress(self, count: int, message: str) -> None:
         self.progress.emit(count, message)
@@ -53,6 +69,10 @@ class ScanWorker(QObject):
                     self._emit_progress(len(results), f"正在扫描，已发现 {len(results)} 个文件…")
 
             for raw in self.paths:
+                if self.is_cancel_requested():
+                    self.finished.emit({'paths': results, 'cancelled': True})
+                    return
+
                 path = Path(raw)
                 if path.is_file():
                     add_file(path)
@@ -63,13 +83,16 @@ class ScanWorker(QObject):
                 self._emit_progress(len(results), f"正在扫描：{path.name}")
                 iterator = path.rglob('*') if self.recursive else path.iterdir()
                 for item in iterator:
+                    if self.is_cancel_requested():
+                        self.finished.emit({'paths': results, 'cancelled': True})
+                        return
                     try:
                         if item.is_file():
                             add_file(item)
                     except OSError:
                         continue
 
-            self.finished.emit(results)
+            self.finished.emit({'paths': results, 'cancelled': False})
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -91,6 +114,13 @@ class RenameWorker(QObject):
         self.mode = mode
         self.continue_on_error = continue_on_error
         self.pre_errors = list(pre_errors or [])
+        self._cancel_requested = False
+
+    def stop(self) -> None:
+        self._cancel_requested = True
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel_requested
 
     def run(self) -> None:
         try:
@@ -100,6 +130,7 @@ class RenameWorker(QObject):
                 continue_on_error=self.continue_on_error,
                 progress=self.progress.emit,
                 pre_errors=self.pre_errors,
+                should_cancel=self.is_cancel_requested,
             )
             self.finished.emit(result)
         except Exception as exc:
