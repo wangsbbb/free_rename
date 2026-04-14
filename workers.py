@@ -26,18 +26,24 @@ class PreviewWorker(QObject):
         return self._cancel_requested
 
     def run(self) -> None:
+        finished_emit = self.finished.emit
+        failed_emit = self.failed.emit
+        is_cancel_requested = self.is_cancel_requested
+        progress_emit = self.progress.emit
+        files = self.files
+        config = self.config
         try:
             rows = RuleEngine.generate_preview(
-                self.files,
-                self.config,
-                should_cancel=self.is_cancel_requested,
-                progress=self.progress.emit,
+                files,
+                config,
+                should_cancel=is_cancel_requested,
+                progress=progress_emit,
             )
-            self.finished.emit({'rows': rows, 'cancelled': False})
+            finished_emit({'rows': rows, 'cancelled': False})
         except OperationCancelled:
-            self.finished.emit({'rows': None, 'cancelled': True})
+            finished_emit({'rows': None, 'cancelled': True})
         except Exception as exc:
-            self.failed.emit(str(exc))
+            failed_emit(str(exc))
 
 
 class ScanWorker(QObject):
@@ -61,22 +67,32 @@ class ScanWorker(QObject):
         self.progress.emit(count, message)
 
     def run(self) -> None:
+        finished_emit = self.finished.emit
+        failed_emit = self.failed.emit
+        progress_emit = self.progress.emit
+        is_cancel_requested = self.is_cancel_requested
+        recursive = self.recursive
+        paths = self.paths
         try:
             results: list[str] = []
             seen: set[str] = set()
+            append_result = results.append
+            seen_add = seen.add
+            seen_contains = seen.__contains__
 
             def add_file(path: Path) -> None:
                 key = str(path).lower()
-                if key in seen:
+                if seen_contains(key):
                     return
-                seen.add(key)
-                results.append(str(path))
-                if len(results) == 1 or len(results) % 200 == 0:
-                    self._emit_progress(len(results), f"正在扫描，已发现 {len(results)} 个文件…")
+                seen_add(key)
+                append_result(str(path))
+                result_count = len(results)
+                if result_count == 1 or result_count % 200 == 0:
+                    progress_emit(result_count, f"正在扫描，已发现 {result_count} 个文件…")
 
-            for raw in self.paths:
-                if self.is_cancel_requested():
-                    self.finished.emit({'paths': results, 'cancelled': True})
+            for raw in paths:
+                if is_cancel_requested():
+                    finished_emit({'paths': results, 'cancelled': True})
                     return
 
                 path = Path(raw)
@@ -86,11 +102,11 @@ class ScanWorker(QObject):
                 if not path.is_dir():
                     continue
 
-                self._emit_progress(len(results), f"正在扫描：{path.name}")
-                iterator = path.rglob('*') if self.recursive else path.iterdir()
+                progress_emit(len(results), f"正在扫描：{path.name}")
+                iterator = path.rglob('*') if recursive else path.iterdir()
                 for item in iterator:
-                    if self.is_cancel_requested():
-                        self.finished.emit({'paths': results, 'cancelled': True})
+                    if is_cancel_requested():
+                        finished_emit({'paths': results, 'cancelled': True})
                         return
                     try:
                         if item.is_file():
@@ -98,9 +114,9 @@ class ScanWorker(QObject):
                     except OSError:
                         continue
 
-            self.finished.emit({'paths': results, 'cancelled': False})
+            finished_emit({'paths': results, 'cancelled': False})
         except Exception as exc:
-            self.failed.emit(str(exc))
+            failed_emit(str(exc))
 
 
 class RenameWorker(QObject):
@@ -129,15 +145,23 @@ class RenameWorker(QObject):
         return self._cancel_requested
 
     def run(self) -> None:
+        finished_emit = self.finished.emit
+        failed_emit = self.failed.emit
+        progress_emit = self.progress.emit
+        is_cancel_requested = self.is_cancel_requested
+        tasks = self.tasks
+        mode = self.mode
+        continue_on_error = self.continue_on_error
+        pre_errors = self.pre_errors
         try:
             result = FileManager.execute(
-                self.tasks,
-                self.mode,
-                continue_on_error=self.continue_on_error,
-                progress=self.progress.emit,
-                pre_errors=self.pre_errors,
-                should_cancel=self.is_cancel_requested,
+                tasks,
+                mode,
+                continue_on_error=continue_on_error,
+                progress=progress_emit,
+                pre_errors=pre_errors,
+                should_cancel=is_cancel_requested,
             )
-            self.finished.emit(result)
+            finished_emit(result)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            failed_emit(str(exc))

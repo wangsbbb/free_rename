@@ -161,7 +161,13 @@ class RuleEngine:
         elif mode in {'修改时间', '创建时间'}:
             safe_timestamp = RuleEngine._safe_timestamp
             attr = 'st_mtime' if mode == '修改时间' else 'st_ctime'
-            items.sort(key=lambda item, safe=safe_timestamp, attr_name=attr: (safe(item, attr_name), item.name.lower(), str(item.path).lower()))
+            items.sort(
+                key=lambda item, safe=safe_timestamp, attr_name=attr: (
+                    safe(item, attr_name),
+                    item.name.lower(),
+                    str(item.path).lower(),
+                )
+            )
         elif mode == '扩展名':
             items.sort(key=lambda item: (item.ext.lower(), item.path.stem.lower(), str(item.path).lower()))
         if config.sort_reverse:
