@@ -1,7 +1,7 @@
+
 from __future__ import annotations
 
 import csv
-import json
 import os
 import re
 import shutil
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, QObject, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QIcon, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -26,14 +26,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QRadioButton,
     QSplitter,
     QStackedWidget,
-    QProgressBar,
     QStatusBar,
     QStyle,
     QTableWidget,
@@ -46,9 +45,9 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0"
+APP_VERSION = "1.0.4"
 APP_TITLE = APP_NAME
-PROJECT_URL = ""  # 上传到 GitHub 后，把这里改成你的仓库地址
+PROJECT_URL = ""
 TEMP_PREFIX = ".__batchrename_temp__"
 INVALID_CHARS = set('\\/:*?"<>|')
 MAX_SAFE_PATH_LEN = 240
@@ -83,7 +82,8 @@ def find_asset(candidates: list[str]) -> Optional[Path]:
                 return path
     return None
 
-@dataclass
+
+@dataclass(frozen=True)
 class FileItem:
     path: Path
 
@@ -96,12 +96,220 @@ class FileItem:
         return self.path.name
 
     @property
-    def stem(self) -> str:
-        return self.path.stem
-
-    @property
     def ext(self) -> str:
         return self.path.suffix
+
+
+@dataclass(frozen=True)
+class RuleConfig:
+    base_name: str
+    start_num: int
+    step: int
+    digits: int
+    position: str
+    separator: str
+    keep_ext: bool
+    insert_enabled: bool
+    insert_text: str
+    insert_mode: str
+    insert_index: int
+    replace_enabled: bool
+    replace_find: str
+    replace_to: str
+    replace_case_sensitive: bool
+    replace_first_only: bool
+    delete_enabled: bool
+    delete_mode: str
+    delete_text: str
+    delete_start: int
+    delete_length: int
+    delete_prefix_count: int
+    delete_suffix_count: int
+    regex_enabled: bool
+    regex_pattern: str
+    regex_replace: str
+    regex_ignore_case: bool
+    filter_enabled: bool
+    filter_ext_text: str
+    filter_mode: str
+
+
+@dataclass(frozen=True)
+class PreviewRow:
+    item: FileItem
+    new_name: Optional[str]
+    state: str
+    ext: str
+    folder: str
+
+
+@dataclass(frozen=True)
+class PreviewSummary:
+    total: int
+    ready: int
+    skip: int
+    duplicate: int
+    error: int
+
+
+class RuleEngine:
+    @staticmethod
+    def parse_exts(raw: str) -> set[str]:
+        exts: set[str] = set()
+        for part in raw.replace("；", ",").replace(" ", ",").split(","):
+            item = part.strip().lower()
+            if not item:
+                continue
+            if not item.startswith("."):
+                item = "." + item
+            exts.add(item)
+        return exts
+
+    @staticmethod
+    def parse_int(value: str, field_name: str, minimum: Optional[int] = None) -> int:
+        try:
+            num = int(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_name}必须是整数") from exc
+        if minimum is not None and num < minimum:
+            raise ValueError(f"{field_name}不能小于{minimum}")
+        return num
+
+    @staticmethod
+    def sanitize_name(stem: str) -> str:
+        cleaned = "".join("_" if ch in INVALID_CHARS else ch for ch in stem)
+        return cleaned.rstrip(" .")
+
+    @staticmethod
+    def get_compiled_regex(config: RuleConfig) -> Optional[tuple[re.Pattern[str], str]]:
+        if not config.regex_enabled:
+            return None
+        pattern = config.regex_pattern.strip()
+        if not pattern:
+            return None
+        flags = re.IGNORECASE if config.regex_ignore_case else 0
+        return re.compile(pattern, flags), config.regex_replace
+
+    @staticmethod
+    def passes_filter(item: FileItem, config: RuleConfig) -> bool:
+        if not config.filter_enabled:
+            return True
+        exts = RuleEngine.parse_exts(config.filter_ext_text)
+        if not exts:
+            return True
+        matched = item.ext.lower() in exts
+        return matched if config.filter_mode == "仅处理这些扩展名" else not matched
+
+    @staticmethod
+    def apply_insert(stem: str, config: RuleConfig) -> str:
+        if not config.insert_enabled or not config.insert_text:
+            return stem
+        if config.insert_mode == "前面":
+            return config.insert_text + stem
+        if config.insert_mode == "后面":
+            return stem + config.insert_text
+        pos = max(0, min(len(stem), config.insert_index - 1))
+        return stem[:pos] + config.insert_text + stem[pos:]
+
+    @staticmethod
+    def apply_replace(stem: str, config: RuleConfig) -> str:
+        if not config.replace_enabled or config.replace_find == "":
+            return stem
+        if config.replace_case_sensitive:
+            if config.replace_first_only:
+                return stem.replace(config.replace_find, config.replace_to, 1)
+            return stem.replace(config.replace_find, config.replace_to)
+
+        pattern = re.escape(config.replace_find)
+        count = 1 if config.replace_first_only else 0
+        return re.sub(pattern, config.replace_to, stem, count=count, flags=re.IGNORECASE)
+
+    @staticmethod
+    def apply_delete(stem: str, config: RuleConfig) -> str:
+        if not config.delete_enabled:
+            return stem
+        mode = config.delete_mode.strip()
+        if mode == "删除文本":
+            return stem.replace(config.delete_text, "") if config.delete_text else stem
+        if mode == "按区间删除":
+            s = max(config.delete_start - 1, 0)
+            e = s + config.delete_length
+            return stem[:s] + stem[e:]
+        if mode == "删除前缀":
+            return stem[config.delete_prefix_count:]
+        if mode == "删除后缀":
+            return stem[:-config.delete_suffix_count] if config.delete_suffix_count > 0 else stem
+        return stem
+
+    @staticmethod
+    def apply_regex(stem: str, regex_rule: Optional[tuple[re.Pattern[str], str]]) -> str:
+        if regex_rule is None:
+            return stem
+        compiled, repl = regex_rule
+        return compiled.sub(repl, stem)
+
+    @staticmethod
+    def build_final_name(item: FileItem, seq_num: int, config: RuleConfig, regex_rule: Optional[tuple[re.Pattern[str], str]]) -> str:
+        number_text = str(seq_num).zfill(config.digits)
+        if config.base_name:
+            if config.position == "前面":
+                stem = f"{number_text}{config.separator}{config.base_name}"
+            else:
+                stem = f"{config.base_name}{config.separator}{number_text}"
+        else:
+            stem = number_text
+
+        stem = RuleEngine.apply_insert(stem, config)
+        stem = RuleEngine.apply_replace(stem, config)
+        stem = RuleEngine.apply_delete(stem, config)
+        stem = RuleEngine.apply_regex(stem, regex_rule)
+        stem = RuleEngine.sanitize_name(stem)
+
+        if not stem:
+            raise ValueError("生成的新文件名为空")
+
+        final_name = stem + (item.ext if config.keep_ext else "")
+        if len(str(item.folder / final_name)) >= MAX_SAFE_PATH_LEN:
+            raise ValueError("目标路径过长")
+        return final_name
+
+    @staticmethod
+    def generate_preview(files: list[FileItem], config: RuleConfig) -> list[PreviewRow]:
+        regex_rule = RuleEngine.get_compiled_regex(config)
+        rows: list[PreviewRow] = []
+        seq_index = 0
+        for item in files:
+            if not RuleEngine.passes_filter(item, config):
+                rows.append(PreviewRow(item=item, new_name=None, state="跳过", ext=item.ext or "-", folder=str(item.folder)))
+                continue
+            try:
+                seq_num = config.start_num + seq_index * config.step
+                new_name = RuleEngine.build_final_name(item, seq_num, config, regex_rule)
+                rows.append(PreviewRow(item=item, new_name=new_name, state="待处理", ext=item.ext or "-", folder=str(item.folder)))
+                seq_index += 1
+            except Exception as exc:
+                rows.append(PreviewRow(item=item, new_name=None, state=f"错误：{exc}", ext=item.ext or "-", folder=str(item.folder)))
+        return rows
+
+    @staticmethod
+    def summarize(rows: list[PreviewRow]) -> tuple[PreviewSummary, dict[str, int]]:
+        target_map: dict[str, int] = {}
+        for row in rows:
+            if row.new_name:
+                target = str(row.item.folder / row.new_name).lower()
+                target_map[target] = target_map.get(target, 0) + 1
+
+        ready = skip = duplicate = error = 0
+        for row in rows:
+            if row.new_name and target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
+                duplicate += 1
+            elif row.state == "跳过":
+                skip += 1
+            elif row.state.startswith("错误"):
+                error += 1
+            else:
+                ready += 1
+        return PreviewSummary(total=len(rows), ready=ready, skip=skip, duplicate=duplicate, error=error), target_map
 
 
 class DropTable(QTableWidget):
@@ -118,7 +326,7 @@ class DropTable(QTableWidget):
         else:
             event.ignore()
 
-    def dragMoveEvent(self, event):
+    def dragMoveEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
@@ -160,6 +368,7 @@ class HeaderIconButton(QToolButton):
             self.setIcon(icon)
             self.setIconSize(QSize(18, 18))
 
+
 class StatCard(QFrame):
     def __init__(self, title: str, value: str, accent: str) -> None:
         super().__init__()
@@ -180,6 +389,23 @@ class StatCard(QFrame):
 
     def set_value(self, value: str) -> None:
         self.value_label.setText(value)
+
+
+class PreviewWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, files: list[FileItem], config: RuleConfig) -> None:
+        super().__init__()
+        self.files = list(files)
+        self.config = config
+
+    def run(self) -> None:
+        try:
+            rows = RuleEngine.generate_preview(self.files, self.config)
+            self.finished.emit(rows)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class RenameWorker(QObject):
@@ -211,11 +437,7 @@ class RenameWorker(QObject):
         for index, (item, new_name) in enumerate(self.tasks, start=1):
             shutil.copy2(item.path, item.folder / new_name)
             self.progress.emit(index, total, f"正在复制：{item.name}")
-        return {
-            "mode": "copy",
-            "completed": total,
-            "updated": {},
-        }
+        return {"mode": "copy", "completed": total, "updated": {}}
 
     def _run_rename(self) -> dict[str, object]:
         total = max(len(self.tasks) * 2, 1)
@@ -258,11 +480,231 @@ class RenameWorker(QObject):
             raise
 
 
+def build_embedded_stylesheet(theme: str) -> str:
+    if theme == "dark":
+        bg = "#0f172a"
+        panel = "#111827"
+        card = "#172033"
+        soft = "#1f2937"
+        text = "#e5e7eb"
+        sub = "#94a3b8"
+        border = "#2a3447"
+        accent = "#3b82f6"
+        accent_hover = "#2563eb"
+        table_alt = "#132033"
+    else:
+        bg = "#f3f5f9"
+        panel = "#eef2f7"
+        card = "#ffffff"
+        soft = "#f8fafc"
+        text = "#111827"
+        sub = "#6b7280"
+        border = "#d9e1ea"
+        accent = "#3b82f6"
+        accent_hover = "#2563eb"
+        table_alt = "#f8fbff"
+
+    return f"""
+    QMainWindow {{
+        background: {bg};
+    }}
+    QWidget {{
+        color: {text};
+        font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
+        font-size: 13px;
+    }}
+    QLabel, QCheckBox, QRadioButton, QGroupBox {{
+        background: transparent;
+    }}
+    QFrame#Sidebar {{
+        background: {panel};
+        border-right: 1px solid {border};
+    }}
+    QLabel#BrandLabel {{
+        font-size: 24px;
+        font-weight: 700;
+        color: {text};
+        padding: 6px 4px 12px 4px;
+    }}
+    QLabel#SidebarHint {{
+        color: {sub};
+        line-height: 1.5;
+        padding: 8px 6px 4px 6px;
+        font-size: 12px;
+    }}
+    QPushButton {{
+        background: {soft};
+        border: 1px solid {border};
+        border-radius: 12px;
+        padding: 10px 14px;
+        color: {text};
+    }}
+    QPushButton:hover {{
+        border-color: {accent};
+        background: {'#ffffff' if theme == 'light' else '#1c2436'};
+    }}
+    QPushButton#NavButton {{
+        text-align: left;
+        padding: 10px 12px;
+        padding-left: 14px;
+        background: {soft};
+    }}
+    QPushButton#NavButton:hover {{
+        border-color: {accent};
+        background: {soft};
+    }}
+    QPushButton#NavButton:checked {{
+        background: rgba(59,130,246,0.12);
+        border-color: rgba(59,130,246,0.28);
+        font-weight: 700;
+    }}
+    QToolButton#HeaderIconButton, QToolButton#GithubButton {{
+        background: {soft};
+        border: 1px solid {border};
+        border-radius: 16px;
+        padding: 8px;
+    }}
+    QToolButton#HeaderIconButton:hover, QToolButton#GithubButton:hover {{
+        border-color: {accent};
+        background: {'#ffffff' if theme == 'light' else '#1c2436'};
+    }}
+    QPushButton:pressed {{
+        background: {accent};
+        color: white;
+    }}
+    QPushButton#PrimaryButton {{
+        background: {accent};
+        color: white;
+        font-weight: 700;
+        border-color: {accent};
+    }}
+    QPushButton#PrimaryButton:hover {{
+        background: {accent_hover};
+        border-color: {accent_hover};
+    }}
+    SidebarButton, QPushButton:checked {{
+        background: rgba(59,130,246,0.14);
+        border-color: rgba(59,130,246,0.28);
+    }}
+    QLabel#PageTitle {{
+        font-size: 28px;
+        font-weight: 700;
+        color: {text};
+    }}
+    QLabel#SubTitle, QLabel#MutedLabel {{
+        color: {sub};
+    }}
+    QLabel#CardTitle {{
+        font-size: 18px;
+        font-weight: 700;
+    }}
+    QLabel#StatValue {{
+        font-size: 26px;
+        font-weight: 700;
+    }}
+    QFrame#TopBar, QFrame#Card, QFrame#StatCard, QFrame#InnerCard {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: 18px;
+    }}
+    QGroupBox#Group {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: 16px;
+        margin-top: 10px;
+        padding-top: 14px;
+        font-weight: 700;
+    }}
+    QGroupBox#Group::title {{
+        subcontrol-origin: margin;
+        left: 14px;
+        padding: 0 6px;
+        color: {text};
+    }}
+    QLineEdit, QComboBox {{
+        background: {soft};
+        border: 1px solid {border};
+        border-radius: 12px;
+        padding: 9px 12px;
+        min-height: 20px;
+    }}
+    QTextEdit, QListWidget {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: 12px;
+    }}
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus {{
+        border-color: {accent};
+    }}
+    QTabWidget::pane {{
+        padding: 8px;
+        margin-top: 8px;
+        background: transparent;
+        border: none;
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {sub};
+        border: 1px solid transparent;
+        border-radius: 12px;
+        padding: 10px 16px;
+        margin-right: 6px;
+    }}
+    QTabBar::tab:selected {{
+        background: rgba(59,130,246,0.12);
+        color: {accent};
+        border-color: rgba(59,130,246,0.24);
+        font-weight: 700;
+    }}
+    QHeaderView::section {{
+        background: {soft};
+        color: {text};
+        padding: 10px;
+        border: none;
+        border-bottom: 1px solid {border};
+        font-weight: 700;
+    }}
+    QTableWidget {{
+        background: {card};
+        alternate-background-color: {table_alt};
+        border: 1px solid {border};
+        border-radius: 14px;
+        gridline-color: {border};
+    }}
+    QTableWidget::item {{
+        padding: 8px;
+    }}
+    QTableWidget::item:selected {{
+        background: rgba(59,130,246,0.16);
+        color: {text};
+    }}
+    QStatusBar {{
+        background: {panel};
+        border-top: 1px solid {border};
+    }}
+    QRadioButton, QCheckBox {{
+        spacing: 8px;
+    }}
+    """
+
+
+def load_stylesheet(theme: str) -> str:
+    style_path = Path(resource_path(f"styles/{theme}.qss"))
+    try:
+        if style_path.exists():
+            return style_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return build_embedded_stylesheet(theme)
+
+
 class RenamerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.files: list[FileItem] = []
-        self.preview_rows: list[tuple[FileItem, Optional[str], str, str, str]] = []
+        self.preview_rows: list[PreviewRow] = []
+        self.preview_summary = PreviewSummary(0, 0, 0, 0, 0)
+        self.preview_target_map: dict[str, int] = {}
         self.history: list[str] = []
         self.current_theme = "light"
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
@@ -272,6 +714,11 @@ class RenamerWindow(QMainWindow):
         self.preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
         self.preview_timer.timeout.connect(self._refresh_preview_debounced)
         self._signals_bound = False
+        self._preview_dirty = False
+        self._preview_pending = False
+        self._preview_pending_show_errors = False
+        self._preview_thread: Optional[QThread] = None
+        self._preview_worker: Optional[PreviewWorker] = None
         self._execute_thread: Optional[QThread] = None
         self._execute_worker: Optional[RenameWorker] = None
         self._build_window()
@@ -308,14 +755,87 @@ class RenamerWindow(QMainWindow):
         self.theme_combo.blockSignals(True)
         self.theme_combo.setCurrentText("深色" if theme == "dark" else "浅色")
         self.theme_combo.blockSignals(False)
+
         geometry = self.settings.value("ui/geometry")
         if geometry:
             self.restoreGeometry(geometry)
+
+        self.base_name_edit.setText(self.settings.value("rules/base_name", "", type=str) or "")
+        self.start_num_edit.setText(self.settings.value("rules/start_num", "1", type=str) or "1")
+        self.step_edit.setText(self.settings.value("rules/step", "1", type=str) or "1")
+        self.digits_combo.setCurrentText(self.settings.value("rules/digits", "1", type=str) or "1")
+        self.position_combo.setCurrentText(self.settings.value("rules/position", "后面", type=str) or "后面")
+        self.sep_edit.setText(self.settings.value("rules/separator", "", type=str) or "")
+        self.keep_ext_check.setChecked(self.settings.value("rules/keep_ext", True, type=bool))
+
+        self.insert_enabled.setChecked(self.settings.value("rules/insert_enabled", False, type=bool))
+        self.insert_text_edit.setText(self.settings.value("rules/insert_text", "", type=str) or "")
+        self.insert_mode_combo.setCurrentText(self.settings.value("rules/insert_mode", "前面", type=str) or "前面")
+        self.insert_index_edit.setText(self.settings.value("rules/insert_index", "1", type=str) or "1")
+
+        self.replace_enabled.setChecked(self.settings.value("rules/replace_enabled", False, type=bool))
+        self.replace_find_edit.setText(self.settings.value("rules/replace_find", "", type=str) or "")
+        self.replace_to_edit.setText(self.settings.value("rules/replace_to", "", type=str) or "")
+        self.replace_case_check.setChecked(self.settings.value("rules/replace_case", False, type=bool))
+        self.replace_first_only_check.setChecked(self.settings.value("rules/replace_first_only", False, type=bool))
+
+        self.delete_enabled.setChecked(self.settings.value("rules/delete_enabled", False, type=bool))
+        self.delete_mode_combo.setCurrentText(self.settings.value("rules/delete_mode", "删除文本", type=str) or "删除文本")
+        self.delete_text_edit.setText(self.settings.value("rules/delete_text", "", type=str) or "")
+        self.delete_start_edit.setText(self.settings.value("rules/delete_start", "1", type=str) or "1")
+        self.delete_len_edit.setText(self.settings.value("rules/delete_length", "1", type=str) or "1")
+        self.delete_prefix_count_edit.setText(self.settings.value("rules/delete_prefix_count", "1", type=str) or "1")
+        self.delete_suffix_count_edit.setText(self.settings.value("rules/delete_suffix_count", "1", type=str) or "1")
+
+        self.regex_enabled.setChecked(self.settings.value("rules/regex_enabled", False, type=bool))
+        self.regex_pattern_edit.setText(self.settings.value("rules/regex_pattern", "", type=str) or "")
+        self.regex_replace_edit.setText(self.settings.value("rules/regex_replace", "", type=str) or "")
+        self.regex_ignore_case_check.setChecked(self.settings.value("rules/regex_ignore_case", False, type=bool))
+
+        self.filter_enabled.setChecked(self.settings.value("rules/filter_enabled", False, type=bool))
+        self.filter_ext_edit.setText(self.settings.value("rules/filter_ext_text", "", type=str) or "")
+        self.filter_mode_combo.setCurrentText(self.settings.value("rules/filter_mode", "仅处理这些扩展名", type=str) or "仅处理这些扩展名")
 
     def _save_ui_settings(self) -> None:
         self.settings.setValue("ui/theme", self.current_theme)
         self.settings.setValue("ui/geometry", self.saveGeometry())
         self.settings.setValue("paths/last_dir", self.last_dir)
+
+        self.settings.setValue("rules/base_name", self.base_name_edit.text())
+        self.settings.setValue("rules/start_num", self.start_num_edit.text())
+        self.settings.setValue("rules/step", self.step_edit.text())
+        self.settings.setValue("rules/digits", self.digits_combo.currentText())
+        self.settings.setValue("rules/position", self.position_combo.currentText())
+        self.settings.setValue("rules/separator", self.sep_edit.text())
+        self.settings.setValue("rules/keep_ext", self.keep_ext_check.isChecked())
+
+        self.settings.setValue("rules/insert_enabled", self.insert_enabled.isChecked())
+        self.settings.setValue("rules/insert_text", self.insert_text_edit.text())
+        self.settings.setValue("rules/insert_mode", self.insert_mode_combo.currentText())
+        self.settings.setValue("rules/insert_index", self.insert_index_edit.text())
+
+        self.settings.setValue("rules/replace_enabled", self.replace_enabled.isChecked())
+        self.settings.setValue("rules/replace_find", self.replace_find_edit.text())
+        self.settings.setValue("rules/replace_to", self.replace_to_edit.text())
+        self.settings.setValue("rules/replace_case", self.replace_case_check.isChecked())
+        self.settings.setValue("rules/replace_first_only", self.replace_first_only_check.isChecked())
+
+        self.settings.setValue("rules/delete_enabled", self.delete_enabled.isChecked())
+        self.settings.setValue("rules/delete_mode", self.delete_mode_combo.currentText())
+        self.settings.setValue("rules/delete_text", self.delete_text_edit.text())
+        self.settings.setValue("rules/delete_start", self.delete_start_edit.text())
+        self.settings.setValue("rules/delete_length", self.delete_len_edit.text())
+        self.settings.setValue("rules/delete_prefix_count", self.delete_prefix_count_edit.text())
+        self.settings.setValue("rules/delete_suffix_count", self.delete_suffix_count_edit.text())
+
+        self.settings.setValue("rules/regex_enabled", self.regex_enabled.isChecked())
+        self.settings.setValue("rules/regex_pattern", self.regex_pattern_edit.text())
+        self.settings.setValue("rules/regex_replace", self.regex_replace_edit.text())
+        self.settings.setValue("rules/regex_ignore_case", self.regex_ignore_case_check.isChecked())
+
+        self.settings.setValue("rules/filter_enabled", self.filter_enabled.isChecked())
+        self.settings.setValue("rules/filter_ext_text", self.filter_ext_edit.text())
+        self.settings.setValue("rules/filter_mode", self.filter_mode_combo.currentText())
 
     def closeEvent(self, event) -> None:
         if self._execute_thread is not None:
@@ -600,7 +1120,7 @@ class RenamerWindow(QMainWindow):
         row.addWidget(self.theme_combo)
         row.addStretch(1)
         box.addLayout(row)
-        note = QLabel("这版采用 PySide6 + QSS 实现现代桌面风格，更适合做成正式软件。")
+        note = QLabel("主题和规则参数会自动记忆；styles 目录存在时会优先读取外部 QSS。")
         note.setWordWrap(True)
         note.setObjectName("MutedLabel")
         box.addWidget(note)
@@ -777,7 +1297,7 @@ class RenamerWindow(QMainWindow):
         self.rename_mode_radio.setChecked(True)
         self.continue_on_error_check = QCheckBox("遇错继续")
         self.continue_on_error_check.setEnabled(False)
-        self.continue_on_error_check.setToolTip("当前仍为整批事务执行，后续可继续扩展为单文件容错模式。")
+        self.continue_on_error_check.setToolTip("当前仍为整批事务执行，后续可扩展为单文件容错模式。")
         mode_row.addWidget(self.rename_mode_radio)
         mode_row.addWidget(self.copy_mode_radio)
         mode_row.addWidget(self.continue_on_error_check)
@@ -789,7 +1309,7 @@ class RenamerWindow(QMainWindow):
         self.export_btn = QPushButton("导出当前列表")
         self.execute_btn = QPushButton("开始重命名")
         self.execute_btn.setObjectName("PrimaryButton")
-        self.refresh_btn.clicked.connect(lambda: self.refresh_preview())
+        self.refresh_btn.clicked.connect(lambda: self.refresh_preview(show_errors=True))
         self.export_btn.clicked.connect(self.export_list)
         self.execute_btn.clicked.connect(self.execute)
         btn_row.addWidget(self.refresh_btn)
@@ -822,232 +1342,8 @@ class RenamerWindow(QMainWindow):
                 app.setWindowIcon(app_icon)
 
     def _setup_stylesheet(self, theme: str) -> None:
-        if theme == "dark":
-            bg = "#0f172a"
-            panel = "#111827"
-            card = "#172033"
-            soft = "#1f2937"
-            text = "#e5e7eb"
-            sub = "#94a3b8"
-            border = "#2a3447"
-            accent = "#3b82f6"
-            accent_hover = "#2563eb"
-            table_alt = "#132033"
-        else:
-            bg = "#f3f5f9"
-            panel = "#eef2f7"
-            card = "#ffffff"
-            soft = "#f8fafc"
-            text = "#111827"
-            sub = "#6b7280"
-            border = "#d9e1ea"
-            accent = "#3b82f6"
-            accent_hover = "#2563eb"
-            table_alt = "#f8fbff"
-
         self.current_theme = theme
-        qss = f"""
-        QMainWindow {{
-            background: {bg};
-        }}
-        QWidget {{
-            color: {text};
-            font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
-            font-size: 13px;
-        }}
-        QLabel, QCheckBox, QRadioButton, QGroupBox {{
-            background: transparent;
-        }}
-        QFrame#Sidebar {{
-            background: {panel};
-            border-right: 1px solid {border};
-        }}
-        QLabel#BrandLabel {{
-            font-size: 24px;
-            font-weight: 700;
-            color: {text};
-            padding: 6px 4px 12px 4px;
-        }}
-        QLabel#SidebarHint {{
-            color: {sub};
-            line-height: 1.5;
-            padding: 8px 6px 4px 6px;
-            font-size: 12px;
-        }}
-        QPushButton {{
-            background: {soft};
-            border: 1px solid {border};
-            border-radius: 12px;
-            padding: 10px 14px;
-            color: {text};
-        }}
-        QPushButton:hover {{
-            border-color: {accent};
-            background: {'#ffffff' if theme == 'light' else '#1c2436'};
-        }}
-        QPushButton#NavButton {{
-            text-align: left;
-            padding: 10px 12px;
-            padding-left: 14px;
-            background: {soft};
-        }}
-        QPushButton#NavButton:hover {{
-            border-color: {accent};
-            background: {soft};
-        }}
-        QPushButton#NavButton:checked {{
-            background: rgba(59,130,246,0.12);
-            border-color: rgba(59,130,246,0.28);
-            font-weight: 700;
-        }}
-        QToolButton#HeaderIconButton, QToolButton#GithubButton {{
-            background: {soft};
-            border: 1px solid {border};
-            border-radius: 16px;
-            padding: 8px;
-        }}
-        QToolButton#HeaderIconButton:hover, QToolButton#GithubButton:hover {{
-            border-color: {accent};
-            background: {'#ffffff' if theme == 'light' else '#1c2436'};
-        }}
-        QPushButton:pressed {{
-            background: {accent};
-            color: white;
-        }}
-        QPushButton#PrimaryButton {{
-            background: {accent};
-            color: white;
-            font-weight: 700;
-            border-color: {accent};
-        }}
-        QPushButton#PrimaryButton:hover {{
-            background: {accent_hover};
-            border-color: {accent_hover};
-        }}
-        QPushButton#UnusedHeaderLinkButton {{
-            background: transparent;
-            border: 1px solid transparent;
-            border-radius: 12px;
-            padding: 8px 14px;
-            color: {text};
-            font-weight: 600;
-        }}
-        QPushButton#HeaderLinkButton:hover {{
-            background: rgba(59,130,246,0.10);
-            border-color: rgba(59,130,246,0.20);
-            color: {accent};
-        }}
-        SidebarButton, QPushButton:checked {{
-            background: rgba(59,130,246,0.14);
-            border-color: rgba(59,130,246,0.28);
-        }}
-        QLabel#PageTitle {{
-            font-size: 28px;
-            font-weight: 700;
-            color: {text};
-        }}
-        QLabel#SubTitle, QLabel#MutedLabel {{
-            color: {sub};
-        }}
-        QLabel#CardTitle {{
-            font-size: 18px;
-            font-weight: 700;
-        }}
-        QLabel#StatValue {{
-            font-size: 26px;
-            font-weight: 700;
-        }}
-        QFrame#TopBar, QFrame#Card, QFrame#StatCard, QFrame#InnerCard {{
-            background: {card};
-            border: 1px solid {border};
-            border-radius: 18px;
-        }}
-        QGroupBox#Group {{
-            background: {card};
-            border: 1px solid {border};
-            border-radius: 16px;
-            margin-top: 10px;
-            padding-top: 14px;
-            font-weight: 700;
-        }}
-        QGroupBox#Group::title {{
-            subcontrol-origin: margin;
-            left: 14px;
-            padding: 0 6px;
-            color: {text};
-        }}
-        QLineEdit, QComboBox {{
-            background: {soft};
-            border: 1px solid {border};
-            border-radius: 12px;
-        }}
-        QTextEdit, QListWidget {{
-            background: {card};
-            border: 1px solid {border};
-            border-radius: 12px;
-        }}
-        QTabWidget::pane {{
-            background: transparent;
-            border: none;
-        }}
-        QLineEdit, QComboBox {{
-            padding: 9px 12px;
-            min-height: 20px;
-        }}
-        QLineEdit:focus, QComboBox:focus, QTextEdit:focus {{
-            border-color: {accent};
-        }}
-        QTabWidget::pane {{
-            padding: 8px;
-            margin-top: 8px;
-            background: transparent;
-            border: none;
-        }}
-        QTabBar::tab {{
-            background: transparent;
-            color: {sub};
-            border: 1px solid transparent;
-            border-radius: 12px;
-            padding: 10px 16px;
-            margin-right: 6px;
-        }}
-        QTabBar::tab:selected {{
-            background: rgba(59,130,246,0.12);
-            color: {accent};
-            border-color: rgba(59,130,246,0.24);
-            font-weight: 700;
-        }}
-        QHeaderView::section {{
-            background: {soft};
-            color: {text};
-            padding: 10px;
-            border: none;
-            border-bottom: 1px solid {border};
-            font-weight: 700;
-        }}
-        QTableWidget {{
-            background: {card};
-            alternate-background-color: {table_alt};
-            border: 1px solid {border};
-            border-radius: 14px;
-            gridline-color: {border};
-        }}
-        QTableWidget::item {{
-            padding: 8px;
-        }}
-        QTableWidget::item:selected {{
-            background: rgba(59,130,246,0.16);
-            color: {text};
-        }}
-        QStatusBar {{
-            background: {panel};
-            border-top: 1px solid {border};
-        }}
-        QRadioButton, QCheckBox {{
-            spacing: 8px;
-        }}
-        """
-        self.setStyleSheet(qss)
+        self.setStyleSheet(load_stylesheet(theme))
 
     def _on_theme_changed(self, text: str) -> None:
         self._setup_stylesheet("dark" if text == "深色" else "light")
@@ -1079,21 +1375,148 @@ class RenamerWindow(QMainWindow):
                     widget.toggled.connect(self._schedule_preview_refresh)
             self._signals_bound = True
 
+    def _build_rule_config(self) -> RuleConfig:
+        return RuleConfig(
+            base_name=self.base_name_edit.text().strip(),
+            start_num=RuleEngine.parse_int(self.start_num_edit.text().strip(), "起始编号"),
+            step=RuleEngine.parse_int(self.step_edit.text().strip(), "递增量", minimum=1),
+            digits=RuleEngine.parse_int(self.digits_combo.currentText().strip(), "位数", minimum=1),
+            position=self.position_combo.currentText().strip(),
+            separator=self.sep_edit.text(),
+            keep_ext=self.keep_ext_check.isChecked(),
+            insert_enabled=self.insert_enabled.isChecked(),
+            insert_text=self.insert_text_edit.text(),
+            insert_mode=self.insert_mode_combo.currentText().strip(),
+            insert_index=RuleEngine.parse_int(self.insert_index_edit.text().strip(), "插入位置", minimum=1),
+            replace_enabled=self.replace_enabled.isChecked(),
+            replace_find=self.replace_find_edit.text(),
+            replace_to=self.replace_to_edit.text(),
+            replace_case_sensitive=self.replace_case_check.isChecked(),
+            replace_first_only=self.replace_first_only_check.isChecked(),
+            delete_enabled=self.delete_enabled.isChecked(),
+            delete_mode=self.delete_mode_combo.currentText().strip(),
+            delete_text=self.delete_text_edit.text(),
+            delete_start=RuleEngine.parse_int(self.delete_start_edit.text().strip(), "删除起始位置", minimum=1),
+            delete_length=RuleEngine.parse_int(self.delete_len_edit.text().strip(), "删除长度", minimum=0),
+            delete_prefix_count=RuleEngine.parse_int(self.delete_prefix_count_edit.text().strip(), "前缀删除数量", minimum=0),
+            delete_suffix_count=RuleEngine.parse_int(self.delete_suffix_count_edit.text().strip(), "后缀删除数量", minimum=0),
+            regex_enabled=self.regex_enabled.isChecked(),
+            regex_pattern=self.regex_pattern_edit.text().strip(),
+            regex_replace=self.regex_replace_edit.text(),
+            regex_ignore_case=self.regex_ignore_case_check.isChecked(),
+            filter_enabled=self.filter_enabled.isChecked(),
+            filter_ext_text=self.filter_ext_edit.text(),
+            filter_mode=self.filter_mode_combo.currentText().strip(),
+        )
+
     def _schedule_preview_refresh(self, *_args) -> None:
         if self._execute_thread is not None:
             return
+        self._preview_dirty = True
         self.progress_label.setText(f"输入已变更，{PREVIEW_DEBOUNCE_MS}ms 后自动刷新预览…")
         self.preview_timer.start()
 
     def _refresh_preview_debounced(self) -> None:
         self.refresh_preview(show_errors=False)
 
+    def refresh_preview(self, show_errors: bool = True) -> None:
+        self.preview_timer.stop()
+        self.file_count_label.setText(f"{len(self.files)} 个文件")
+        self._start_preview(show_errors=show_errors)
+
+    def _start_preview(self, show_errors: bool) -> None:
+        self.file_count_label.setText(f"{len(self.files)} 个文件")
+        if self._preview_thread is not None:
+            self._preview_pending = True
+            self._preview_pending_show_errors = self._preview_pending_show_errors or show_errors
+            self.progress_label.setText("预览正在计算，已合并新的刷新请求…")
+            return
+
+        if not self.files:
+            self.preview_rows = []
+            self.preview_summary = PreviewSummary(0, 0, 0, 0, 0)
+            self.preview_target_map = {}
+            self._preview_dirty = False
+            self._render_preview()
+            self._update_home_stats()
+            self._refresh_history_panel()
+            self.progress_label.setText("空闲")
+            return
+
+        try:
+            config = self._build_rule_config()
+        except Exception as exc:
+            self._preview_dirty = True
+            if show_errors:
+                QMessageBox.warning(self, APP_TITLE, str(exc))
+            self.status.showMessage(f"预览未更新：{exc}")
+            self.progress_label.setText(f"预览参数无效：{exc}")
+            return
+
+        self._set_preview_busy(True)
+        self.progress_label.setText("正在后台计算预览…")
+        self.status.showMessage("正在后台计算预览…")
+
+        self._preview_thread = QThread(self)
+        self._preview_worker = PreviewWorker(self.files, config)
+        self._preview_worker.moveToThread(self._preview_thread)
+        self._preview_thread.started.connect(self._preview_worker.run)
+        self._preview_worker.finished.connect(self._on_preview_finished)
+        self._preview_worker.finished.connect(self._preview_thread.quit)
+        self._preview_worker.failed.connect(lambda text: self._on_preview_failed(text, show_errors))
+        self._preview_worker.failed.connect(self._preview_thread.quit)
+        self._preview_thread.finished.connect(self._cleanup_preview_thread)
+        self._preview_thread.start()
+
+    def _set_preview_busy(self, busy: bool) -> None:
+        self.refresh_btn.setEnabled(not busy and self._execute_thread is None)
+        self.execute_btn.setEnabled(not busy and self._execute_thread is None)
+        self.export_btn.setEnabled(not busy and self._execute_thread is None and bool(self.preview_rows))
+
     def _set_execute_busy(self, busy: bool) -> None:
-        self.execute_btn.setEnabled(not busy)
-        self.refresh_btn.setEnabled(not busy)
-        self.export_btn.setEnabled(not busy)
+        self.execute_btn.setEnabled(not busy and self._preview_thread is None)
+        self.refresh_btn.setEnabled(not busy and self._preview_thread is None)
+        self.export_btn.setEnabled(not busy and self._preview_thread is None)
         self.tabs.setEnabled(not busy)
         self.table.setEnabled(not busy)
+
+    def _on_preview_finished(self, result: object) -> None:
+        rows = result if isinstance(result, list) else []
+        normalized_rows = [row for row in rows if isinstance(row, PreviewRow)]
+        self.preview_rows = normalized_rows
+        self.preview_summary, self.preview_target_map = RuleEngine.summarize(self.preview_rows)
+        self._preview_dirty = False
+        self._render_preview()
+        self._update_home_stats()
+        self._refresh_history_panel()
+        self.progress_label.setText("预览已更新")
+        self.status.showMessage(
+            f"共 {self.preview_summary.total} 个文件，可处理 {self.preview_summary.ready} 个，跳过 {self.preview_summary.skip} 个，"
+            f"冲突 {self.preview_summary.duplicate} 个，错误 {self.preview_summary.error} 个"
+        )
+        self._set_preview_busy(False)
+
+    def _on_preview_failed(self, error_text: str, show_errors: bool) -> None:
+        self._preview_dirty = True
+        self._set_preview_busy(False)
+        self.progress_label.setText(f"预览参数无效：{error_text}")
+        self.status.showMessage(f"预览未更新：{error_text}")
+        if show_errors:
+            QMessageBox.warning(self, APP_TITLE, error_text)
+
+    def _cleanup_preview_thread(self) -> None:
+        if self._preview_worker is not None:
+            self._preview_worker.deleteLater()
+        if self._preview_thread is not None:
+            self._preview_thread.deleteLater()
+        self._preview_worker = None
+        self._preview_thread = None
+        self._set_preview_busy(False)
+        if self._preview_pending and self._execute_thread is None:
+            show_errors = self._preview_pending_show_errors
+            self._preview_pending = False
+            self._preview_pending_show_errors = False
+            QTimer.singleShot(0, lambda: self._start_preview(show_errors=show_errors))
 
     def add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "选择文件", self._dialog_start_dir())
@@ -1105,13 +1528,15 @@ class RenamerWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹", self._dialog_start_dir())
         if folder:
             self._remember_path(folder)
-            self._append_paths([str(p) for p in Path(folder).iterdir() if p.is_file()])
+            entries = [str(Path(folder) / name) for name in os.listdir(folder) if (Path(folder) / name).is_file()]
+            self._append_paths(entries)
 
     def add_folder_recursive(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹（递归添加）", self._dialog_start_dir())
         if folder:
             self._remember_path(folder)
-            self._append_paths([str(p) for p in Path(folder).rglob("*") if p.is_file()])
+            entries = [str(p) for p in Path(folder).rglob("*") if p.is_file()]
+            self._append_paths(entries)
 
     def on_files_dropped(self, paths: list[str]) -> None:
         expanded: list[str] = []
@@ -1151,8 +1576,10 @@ class RenamerWindow(QMainWindow):
     def clear_files(self) -> None:
         self.files.clear()
         self.preview_rows.clear()
+        self.preview_summary = PreviewSummary(0, 0, 0, 0, 0)
+        self.preview_target_map.clear()
         self.history.append("清空列表")
-        self.refresh_preview()
+        self.refresh_preview(show_errors=False)
 
     def move_selected(self, delta: int) -> None:
         rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
@@ -1164,251 +1591,78 @@ class RenamerWindow(QMainWindow):
         if new_row < 0 or new_row >= len(self.files):
             return
         self.files[row], self.files[new_row] = self.files[new_row], self.files[row]
-        self.refresh_preview()
+        self.refresh_preview(show_errors=False)
         self.table.selectRow(new_row)
-
-    def _parse_int(self, value: str, field_name: str, minimum: Optional[int] = None) -> int:
-        try:
-            num = int(value)
-        except ValueError as exc:
-            raise ValueError(f"{field_name}必须是整数") from exc
-        if minimum is not None and num < minimum:
-            raise ValueError(f"{field_name}不能小于{minimum}")
-        return num
-
-    def _parse_exts(self, raw: str) -> set[str]:
-        exts = set()
-        for part in raw.replace("；", ",").replace(" ", ",").split(","):
-            item = part.strip().lower()
-            if not item:
-                continue
-            if not item.startswith("."):
-                item = "." + item
-            exts.add(item)
-        return exts
-
-    def _passes_filter(self, item: FileItem) -> bool:
-        if not self.filter_enabled.isChecked():
-            return True
-        exts = self._parse_exts(self.filter_ext_edit.text())
-        if not exts:
-            return True
-        matched = item.ext.lower() in exts
-        return matched if self.filter_mode_combo.currentText() == "仅处理这些扩展名" else not matched
-
-    def _sanitize_name(self, stem: str) -> str:
-        cleaned = "".join("_" if ch in INVALID_CHARS else ch for ch in stem)
-        return cleaned.rstrip(" .")
-
-    def _apply_insert(self, stem: str) -> str:
-        if not self.insert_enabled.isChecked():
-            return stem
-        text = self.insert_text_edit.text()
-        if not text:
-            return stem
-        mode = self.insert_mode_combo.currentText().strip()
-        if mode == "前面":
-            return text + stem
-        if mode == "后面":
-            return stem + text
-        index = self._parse_int(self.insert_index_edit.text().strip(), "插入位置", minimum=1)
-        pos = max(0, min(len(stem), index - 1))
-        return stem[:pos] + text + stem[pos:]
-
-    def _apply_replace(self, stem: str) -> str:
-        if not self.replace_enabled.isChecked():
-            return stem
-        old = self.replace_find_edit.text()
-        new = self.replace_to_edit.text()
-        if old == "":
-            return stem
-        if self.replace_case_check.isChecked():
-            return stem.replace(old, new, 1) if self.replace_first_only_check.isChecked() else stem.replace(old, new)
-        pattern = re.escape(old)
-        count = 1 if self.replace_first_only_check.isChecked() else 0
-        return re.sub(pattern, new, stem, count=count, flags=re.IGNORECASE)
-
-    def _apply_delete(self, stem: str) -> str:
-        if not self.delete_enabled.isChecked():
-            return stem
-        mode = self.delete_mode_combo.currentText().strip()
-        if mode == "删除文本":
-            text = self.delete_text_edit.text()
-            return stem.replace(text, "") if text else stem
-        if mode == "按区间删除":
-            start = self._parse_int(self.delete_start_edit.text().strip(), "删除起始位置", minimum=1)
-            length = self._parse_int(self.delete_len_edit.text().strip(), "删除长度", minimum=0)
-            s = start - 1
-            e = s + length
-            return stem[:s] + stem[e:]
-        if mode == "删除前缀":
-            count = self._parse_int(self.delete_prefix_count_edit.text().strip(), "前缀删除数量", minimum=0)
-            return stem[count:]
-        if mode == "删除后缀":
-            count = self._parse_int(self.delete_suffix_count_edit.text().strip(), "后缀删除数量", minimum=0)
-            return stem[:-count] if count > 0 else stem
-        return stem
-
-    def _get_compiled_regex(self) -> Optional[tuple[re.Pattern[str], str]]:
-        if not self.regex_enabled.isChecked():
-            return None
-        pattern = self.regex_pattern_edit.text().strip()
-        if not pattern:
-            return None
-        flags = re.IGNORECASE if self.regex_ignore_case_check.isChecked() else 0
-        compiled = re.compile(pattern, flags)
-        return compiled, self.regex_replace_edit.text()
-
-    def _apply_regex(self, stem: str, regex_rule: Optional[tuple[re.Pattern[str], str]] = None) -> str:
-        if regex_rule is None:
-            regex_rule = self._get_compiled_regex()
-        if regex_rule is None:
-            return stem
-        compiled, repl = regex_rule
-        return compiled.sub(repl, stem)
-
-    def _build_final_name(self, item: FileItem, seq_num: int, regex_rule: Optional[tuple[re.Pattern[str], str]] = None) -> str:
-        digits = self._parse_int(self.digits_combo.currentText().strip(), "位数", minimum=1)
-        number_text = str(seq_num).zfill(digits)
-        base_name = self.base_name_edit.text().strip()
-        sep = self.sep_edit.text()
-        position = self.position_combo.currentText().strip()
-        stem = f"{number_text}{sep}{base_name}" if base_name and position == "前面" else f"{base_name}{sep}{number_text}" if base_name else number_text
-        stem = self._apply_insert(stem)
-        stem = self._apply_replace(stem)
-        stem = self._apply_delete(stem)
-        stem = self._apply_regex(stem, regex_rule)
-        stem = self._sanitize_name(stem)
-        if not stem:
-            raise ValueError("生成的新文件名为空")
-        final_name = stem + (item.ext if self.keep_ext_check.isChecked() else "")
-        if len(str(item.folder / final_name)) >= MAX_SAFE_PATH_LEN:
-            raise ValueError("目标路径过长")
-        return final_name
-
-    def generate_preview(self) -> list[tuple[FileItem, Optional[str], str, str, str]]:
-        start_num = self._parse_int(self.start_num_edit.text().strip(), "起始编号")
-        step = self._parse_int(self.step_edit.text().strip(), "递增量", minimum=1)
-        regex_rule = self._get_compiled_regex()
-        preview: list[tuple[FileItem, Optional[str], str, str, str]] = []
-        seq_index = 0
-        for item in self.files:
-            if not self._passes_filter(item):
-                preview.append((item, None, "跳过", item.ext or "-", str(item.folder)))
-                continue
-            try:
-                seq_num = start_num + seq_index * step
-                new_name = self._build_final_name(item, seq_num, regex_rule)
-                preview.append((item, new_name, "待处理", item.ext or "-", str(item.folder)))
-                seq_index += 1
-            except Exception as exc:
-                preview.append((item, None, f"错误：{exc}", item.ext or "-", str(item.folder)))
-        return preview
-
-    def refresh_preview(self, show_errors: bool = True) -> None:
-        self.preview_timer.stop()
-        self.file_count_label.setText(f"{len(self.files)} 个文件")
-        try:
-            new_preview = self.generate_preview() if self.files else []
-        except Exception as exc:
-            if show_errors:
-                QMessageBox.warning(self, APP_TITLE, str(exc))
-            self.status.showMessage(f"预览未更新：{exc}")
-            self.progress_label.setText(f"预览参数无效：{exc}")
-            return
-        self.preview_rows = new_preview
-        self._render_preview()
-        self._update_home_stats()
-        self._refresh_history_panel()
-        if self._execute_thread is None:
-            self.progress_label.setText("预览已更新")
 
     def _render_preview(self) -> None:
         self.table.setRowCount(0)
         if not self.preview_rows:
             self.status.showMessage("请选择文件、文件夹，或直接拖入窗口")
             self.home_info.setPlainText("还没有导入文件。\n\n你可以从左侧工作区进入‘批量重命名’，也可以在首页快速添加文件。")
+            self.export_btn.setEnabled(False if self._execute_thread is None else False)
             return
 
-        target_map: dict[str, int] = {}
-        for item, new_name, _state, _ext, _folder in self.preview_rows:
-            if new_name:
-                target = str(item.folder / new_name).lower()
-                target_map[target] = target_map.get(target, 0) + 1
-
-        dup_count = err_count = skip_count = 0
         self.table.setRowCount(len(self.preview_rows))
-        for row, (item, new_name, state, ext, folder) in enumerate(self.preview_rows):
-            show_name = new_name or "-"
+        for row_idx, row in enumerate(self.preview_rows):
+            show_name = row.new_name or "-"
+            state = row.state
             bg = None
-            if new_name and target_map.get(str(item.folder / new_name).lower(), 0) > 1:
+            if row.new_name and self.preview_target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
                 state = "重名冲突"
-                dup_count += 1
                 bg = QColor("#fee2e2")
-            elif state.startswith("错误"):
-                err_count += 1
+            elif row.state.startswith("错误"):
                 bg = QColor("#ffedd5")
-            elif state == "跳过":
-                skip_count += 1
+            elif row.state == "跳过":
                 bg = QColor("#f3f4f6")
 
-            values = [item.name, show_name, state, ext, folder]
+            values = [row.item.name, show_name, state, row.ext, row.folder]
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 if bg:
                     cell.setBackground(bg)
-                self.table.setItem(row, col, cell)
+                self.table.setItem(row_idx, col, cell)
+
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
 
-        ok_count = len(self.preview_rows) - dup_count - err_count - skip_count
-        self.status.showMessage(f"共 {len(self.preview_rows)} 个文件，可处理 {ok_count} 个，跳过 {skip_count} 个，冲突 {dup_count} 个，错误 {err_count} 个")
         self.home_info.setPlainText(
-            f"当前文件总数：{len(self.preview_rows)}\n"
-            f"可处理：{ok_count}\n跳过：{skip_count}\n重名冲突：{dup_count}\n错误：{err_count}\n\n"
-            "界面已经切换为 PySide6 仪表盘风格。"
+            f"当前文件总数：{self.preview_summary.total}\n"
+            f"可处理：{self.preview_summary.ready}\n"
+            f"跳过：{self.preview_summary.skip}\n"
+            f"重名冲突：{self.preview_summary.duplicate}\n"
+            f"错误：{self.preview_summary.error}\n\n"
+            "当前版本已将预览计算移到后台线程，并把规则计算逻辑从窗口类中拆分出来。"
         )
+        if self._execute_thread is None and self._preview_thread is None:
+            self.export_btn.setEnabled(True)
 
     def _update_home_stats(self) -> None:
-        total = len(self.preview_rows)
-        ready = dup = err = 0
-        target_map: dict[str, int] = {}
-        for item, new_name, _state, _ext, _folder in self.preview_rows:
-            if new_name:
-                target = str(item.folder / new_name).lower()
-                target_map[target] = target_map.get(target, 0) + 1
-        for item, new_name, state, *_ in self.preview_rows:
-            if new_name and target_map.get(str(item.folder / new_name).lower(), 0) > 1:
-                dup += 1
-            elif state.startswith("错误") or state == "跳过":
-                err += 1
-            else:
-                ready += 1
-        self.card_total.set_value(str(total))
-        self.card_ready.set_value(str(ready))
-        self.card_dup.set_value(str(dup))
-        self.card_err.set_value(str(err))
+        self.card_total.set_value(str(self.preview_summary.total))
+        self.card_ready.set_value(str(self.preview_summary.ready))
+        self.card_dup.set_value(str(self.preview_summary.duplicate))
+        self.card_err.set_value(str(self.preview_summary.error + self.preview_summary.skip))
 
     def _refresh_history_panel(self) -> None:
         self.history_list.clear()
         for text in self.history[-100:][::-1]:
             self.history_list.addItem(text)
 
-    def validate_execute(self) -> list[tuple[FileItem, str]]:
-        if not self.preview_rows:
-            raise ValueError("没有可处理的文件")
+    def _build_tasks_from_current_rules(self) -> list[tuple[FileItem, str]]:
+        config = self._build_rule_config()
+        rows = RuleEngine.generate_preview(self.files, config)
+        _, target_map = RuleEngine.summarize(rows)
         todo: list[tuple[FileItem, str]] = []
         seen: set[str] = set()
-        for item, new_name, state, _ext, _folder in self.preview_rows:
-            if state == "跳过":
+        for row in rows:
+            if row.state == "跳过":
                 continue
-            if not new_name:
-                raise ValueError(f"文件 {item.name} 无法生成新文件名")
-            target = str(item.folder / new_name).lower()
-            if target in seen:
-                raise ValueError(f"存在重名冲突：{new_name}")
+            if not row.new_name:
+                raise ValueError(f"文件 {row.item.name} 无法生成新文件名")
+            target = str(row.item.folder / row.new_name).lower()
+            if target_map.get(target, 0) > 1 or target in seen:
+                raise ValueError(f"存在重名冲突：{row.new_name}")
             seen.add(target)
-            todo.append((item, new_name))
+            todo.append((row.item, row.new_name))
         if not todo:
             raise ValueError("没有可执行的文件")
         return todo
@@ -1417,12 +1671,16 @@ class RenamerWindow(QMainWindow):
         if self._execute_thread is not None:
             QMessageBox.information(self, APP_TITLE, "当前任务仍在执行中，请稍后。")
             return
+        if self._preview_thread is not None:
+            QMessageBox.information(self, APP_TITLE, "预览仍在计算中，请稍后再执行。")
+            return
+
         try:
-            self.refresh_preview()
-            tasks = self.validate_execute()
+            tasks = self._build_tasks_from_current_rules()
         except ValueError as exc:
             QMessageBox.critical(self, APP_TITLE, str(exc))
             return
+
         mode = "copy" if self.copy_mode_radio.isChecked() else "rename"
         mode_text = "另存为副本" if mode == "copy" else "覆盖原文件"
         if QMessageBox.question(self, APP_TITLE, f"确认开始处理吗？\n\n文件数量：{len(tasks)}\n执行方式：{mode_text}") != QMessageBox.Yes:
@@ -1463,6 +1721,7 @@ class RenamerWindow(QMainWindow):
         if isinstance(updated_raw, dict) and updated_raw:
             updated = {key: Path(value) for key, value in updated_raw.items()}
             self.files = [FileItem(updated.get(str(item.path).lower(), item.path)) for item in self.files]
+
         completed = int(data.get("completed", 0) or 0)
         mode = str(data.get("mode", "rename"))
         mode_text = "另存为副本" if mode == "copy" else "覆盖原文件"
@@ -1471,9 +1730,9 @@ class RenamerWindow(QMainWindow):
         self.progress_bar.setFormat(f"{self.progress_bar.maximum()}/{self.progress_bar.maximum()}")
         self.history.append(f"执行完成：{completed} 个文件，模式={mode_text}")
         self._refresh_history_panel()
-        self.refresh_preview(show_errors=False)
         self.progress_label.setText(f"处理完成：{completed} 个文件")
         self.status.showMessage(f"处理完成，共 {completed} 个文件。")
+        self.refresh_preview(show_errors=False)
         QMessageBox.information(self, APP_TITLE, f"处理完成，共 {completed} 个文件。")
 
     def _on_execute_failed(self, error_text: str) -> None:
@@ -1492,28 +1751,43 @@ class RenamerWindow(QMainWindow):
             self._execute_thread.deleteLater()
         self._execute_worker = None
         self._execute_thread = None
+        self._set_execute_busy(False)
 
     def export_list(self) -> None:
         if not self.preview_rows:
             QMessageBox.information(self, APP_TITLE, "当前没有可导出的内容。")
             return
+
         default_path = str(Path(self._dialog_start_dir()) / "rename_preview.csv")
         save_path, _ = QFileDialog.getSaveFileName(self, "导出当前列表", default_path, "CSV Files (*.csv);;Text Files (*.txt)")
         if not save_path:
             return
         self._remember_path(save_path)
+
         try:
             path = Path(save_path)
             if path.suffix.lower() == ".csv":
                 with path.open("w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(["原文件名", "预览新文件名", "状态", "扩展名", "所在目录"])
-                    for item, new_name, state, ext, folder in self.preview_rows:
-                        writer.writerow([item.name, new_name or "", state, ext, folder])
+                    for row in self.preview_rows:
+                        state = row.state
+                        if row.new_name and self.preview_target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
+                            state = "重名冲突"
+                        writer.writerow([row.item.name, row.new_name or "", state, row.ext, row.folder])
             else:
                 parts = []
-                for item, new_name, state, ext, folder in self.preview_rows:
-                    parts.append(f"原文件名：{item.name}\n预览新文件名：{new_name or '-'}\n状态：{state}\n扩展名：{ext}\n所在目录：{folder}\n{'-' * 60}")
+                for row in self.preview_rows:
+                    state = row.state
+                    if row.new_name and self.preview_target_map.get(str(row.item.folder / row.new_name).lower(), 0) > 1:
+                        state = "重名冲突"
+                    parts.append(
+                        f"原文件名：{row.item.name}\n"
+                        f"预览新文件名：{row.new_name or '-'}\n"
+                        f"状态：{state}\n"
+                        f"扩展名：{row.ext}\n"
+                        f"所在目录：{row.folder}\n{'-' * 60}"
+                    )
                 path.write_text("\n".join(parts), encoding="utf-8")
             QMessageBox.information(self, APP_TITLE, "导出完成。")
             self.history.append(f"导出列表：{path}")
