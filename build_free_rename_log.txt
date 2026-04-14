@@ -1,0 +1,90 @@
+[INFO] free_rename v1.0 onefile build 
+[INFO] Working dir: C:\Users\sexer\Desktop\璞嗙摚宸ュ叿\鎵归噺閲嶅懡鍚峔free_rename_v1.0_github\
+[INFO] Python: py -3
+Defaulting to user installation because normal site-packages is not writeable
+Requirement already satisfied: pip in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (26.0.1)
+Defaulting to user installation because normal site-packages is not writeable
+Requirement already satisfied: pyinstaller in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (6.19.0)
+Requirement already satisfied: PySide6<7,>=6.7 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from -r C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\requirements_free_rename.txt (line 1)) (6.11.0)
+Requirement already satisfied: shiboken6==6.11.0 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from PySide6<7,>=6.7->-r C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\requirements_free_rename.txt (line 1)) (6.11.0)
+Requirement already satisfied: PySide6_Essentials==6.11.0 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from PySide6<7,>=6.7->-r C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\requirements_free_rename.txt (line 1)) (6.11.0)
+Requirement already satisfied: PySide6_Addons==6.11.0 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from PySide6<7,>=6.7->-r C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\requirements_free_rename.txt (line 1)) (6.11.0)
+Requirement already satisfied: altgraph in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from pyinstaller) (0.17.5)
+Requirement already satisfied: packaging>=22.0 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from pyinstaller) (25.0)
+Requirement already satisfied: pefile>=2022.5.30 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from pyinstaller) (2024.8.26)
+Requirement already satisfied: pyinstaller-hooks-contrib>=2026.0 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from pyinstaller) (2026.3)
+Requirement already satisfied: pywin32-ctypes>=0.2.1 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from pyinstaller) (0.2.3)
+Requirement already satisfied: setuptools>=42.0.0 in C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages (from pyinstaller) (82.0.1)
+[INFO] Running PyInstaller...
+88 INFO: PyInstaller: 6.19.0, contrib hooks: 2026.3
+88 INFO: Python: 3.12.1
+122 INFO: Platform: Windows-11-10.0.26200-SP0
+122 INFO: Python environment: C:\Program Files\Python312
+123 INFO: wrote C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\free_rename.spec
+125 INFO: Removing temporary files and cleaning cache in C:\Users\sexer\AppData\Local\pyinstaller
+126 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\sexer\\Desktop\\豆瓣工具\\批量重命名\\free_rename_v1.0_github',
+ 'C:\\Program Files\\Python312\\python312.zip',
+ 'C:\\Program Files\\Python312\\DLLs',
+ 'C:\\Program Files\\Python312\\Lib',
+ 'C:\\Program Files\\Python312',
+ 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages',
+ 'C:\\Program Files\\Python312\\Lib\\site-packages',
+ 'C:\\Users\\sexer\\Desktop\\豆瓣工具\\批量重命名\\free_rename_v1.0_github']
+349 INFO: Appending 'datas' from .spec
+350 INFO: checking Analysis
+350 INFO: Building Analysis because Analysis-00.toc is non existent
+350 INFO: Looking for Python shared library...
+350 INFO: Using Python shared library: C:\Program Files\Python312\python312.dll
+350 INFO: Running Analysis Analysis-00.toc
+350 INFO: Target bytecode optimization level: 0
+350 INFO: Initializing module dependency graph...
+350 INFO: Initializing module graph hook caches...
+358 INFO: Analyzing modules for base_library.zip ...
+1120 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+1964 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+2580 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+2760 INFO: Caching module dependency graph...
+2779 INFO: Analyzing C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\free_rename.py
+2826 INFO: Processing standard module hook 'hook-PySide6.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+2934 INFO: Processing standard module hook 'hook-shiboken6.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+3013 INFO: Processing standard module hook 'hook-PySide6.QtNetwork.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+4892 INFO: Processing standard module hook 'hook-PySide6.QtCore.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+9083 INFO: Processing standard module hook 'hook-PySide6.QtGui.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+29238 INFO: Processing standard module hook 'hook-PySide6.QtWidgets.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+32779 INFO: Processing module hooks (post-graph stage)...
+32785 INFO: Performing binary vs. data reclassification (127 entries)
+32800 INFO: Looking for ctypes DLLs
+32802 INFO: Analyzing run-time hooks ...
+32803 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks\\rthooks'
+32804 INFO: Including run-time hook 'pyi_rth_pyside6.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks\\rthooks'
+32805 INFO: Processing pre-find-module-path hook 'hook-_pyi_rth_utils.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+32806 INFO: Processing standard module hook 'hook-_pyi_rth_utils.py' from 'C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PyInstaller\\hooks'
+32810 INFO: Creating base_library.zip...
+32823 INFO: Looking for dynamic libraries
+32936 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\shiboken6']
+32936 INFO: Extra DLL search directories (PATH): ['C:\\Users\\sexer\\AppData\\Roaming\\Python\\Python312\\site-packages\\PySide6']
+33445 INFO: Warnings written to C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\build\free_rename\warn-free_rename.txt
+33454 INFO: Graph cross-reference written to C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\build\free_rename\xref-free_rename.html
+33468 INFO: checking PYZ
+33468 INFO: Building PYZ because PYZ-00.toc is non existent
+33468 INFO: Building PYZ (ZlibArchive) C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\build\free_rename\PYZ-00.pyz
+33556 INFO: Building PYZ (ZlibArchive) C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\build\free_rename\PYZ-00.pyz completed successfully.
+33562 INFO: checking PKG
+33562 INFO: Building PKG because PKG-00.toc is non existent
+33562 INFO: Building PKG (CArchive) free_rename.pkg
+41712 INFO: Building PKG (CArchive) free_rename.pkg completed successfully.
+41715 INFO: Bootloader C:\Users\sexer\AppData\Roaming\Python\Python312\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+41715 INFO: checking EXE
+41715 INFO: Building EXE because EXE-00.toc is non existent
+41715 INFO: Building EXE from EXE-00.toc
+41715 INFO: Copying bootloader EXE to C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\dist\free_rename.exe
+41998 INFO: Copying icon to EXE
+42141 INFO: Copying version information to EXE
+42292 INFO: Copying 0 resources to EXE
+42292 INFO: Embedding manifest in EXE
+42444 INFO: Appending PKG archive to EXE
+42468 INFO: Fixing EXE headers
+42610 INFO: Building EXE from EXE-00.toc completed successfully.
+42613 INFO: Build complete! The results are available in: C:\Users\sexer\Desktop\豆瓣工具\批量重命名\free_rename_v1.0_github\dist
+[OK] Build complete: dist\free_rename.exe
