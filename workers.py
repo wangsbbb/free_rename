@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -73,44 +74,75 @@ class ScanWorker(QObject):
         is_cancel_requested = self.is_cancel_requested
         recursive = self.recursive
         paths = self.paths
+        scandir = os.scandir
         try:
             results: list[str] = []
             seen: set[str] = set()
             append_result = results.append
             seen_add = seen.add
             seen_contains = seen.__contains__
+            path_cls = Path
 
-            def add_file(path: Path) -> None:
-                key = str(path).lower()
+            def add_file_path(path_str: str) -> None:
+                key = path_str.lower()
                 if seen_contains(key):
                     return
                 seen_add(key)
-                append_result(str(path))
+                append_result(path_str)
                 result_count = len(results)
                 if result_count == 1 or result_count % 200 == 0:
                     progress_emit(result_count, f"正在扫描，已发现 {result_count} 个文件…")
+
+            def scan_directory(dir_path: str) -> bool:
+                try:
+                    with scandir(dir_path) as entries:
+                        for entry in entries:
+                            if is_cancel_requested():
+                                return False
+                            try:
+                                if entry.is_file(follow_symlinks=False):
+                                    add_file_path(entry.path)
+                                elif recursive and entry.is_dir(follow_symlinks=False):
+                                    if not scan_directory(entry.path):
+                                        return False
+                            except OSError:
+                                continue
+                except OSError:
+                    return True
+                return True
 
             for raw in paths:
                 if is_cancel_requested():
                     finished_emit({'paths': results, 'cancelled': True})
                     return
 
-                path = Path(raw)
-                if path.is_file():
-                    add_file(path)
-                    continue
-                if not path.is_dir():
+                path = path_cls(raw)
+                try:
+                    if path.is_file():
+                        add_file_path(str(path))
+                        continue
+                    if not path.is_dir():
+                        continue
+                except OSError:
                     continue
 
                 progress_emit(len(results), f"正在扫描：{path.name}")
-                iterator = path.rglob('*') if recursive else path.iterdir()
-                for item in iterator:
-                    if is_cancel_requested():
+                if recursive:
+                    if not scan_directory(str(path)):
                         finished_emit({'paths': results, 'cancelled': True})
                         return
+                else:
                     try:
-                        if item.is_file():
-                            add_file(item)
+                        with scandir(path) as entries:
+                            for entry in entries:
+                                if is_cancel_requested():
+                                    finished_emit({'paths': results, 'cancelled': True})
+                                    return
+                                try:
+                                    if entry.is_file(follow_symlinks=False):
+                                        add_file_path(entry.path)
+                                except OSError:
+                                    continue
                     except OSError:
                         continue
 

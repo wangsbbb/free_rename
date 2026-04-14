@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'free_rename'),
           StringStruct('FileDescription', 'free_rename'),
-          StringStruct('FileVersion', '1.0.11'),
+          StringStruct('FileVersion', '1.0.12'),
           StringStruct('InternalName', 'free_rename'),
           StringStruct('OriginalFilename', 'free_rename.exe'),
           StringStruct('ProductName', 'free_rename'),
-          StringStruct('ProductVersion', '1.0.11')
+          StringStruct('ProductVersion', '1.0.12')
         ]
       )
     ]),

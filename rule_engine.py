@@ -73,7 +73,7 @@ class RuleConfig:
     filter_mode: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PreviewRow:
     item: FileItem
     new_name: Optional[str]
@@ -156,23 +156,33 @@ class RuleEngine:
     def sort_files(files: list[FileItem], config: RuleConfig) -> list[FileItem]:
         items = list(files)
         mode = config.sort_mode if config.sort_mode in RuleEngine.SORT_MODES else '当前顺序'
+        reverse = config.sort_reverse
+
+        if mode == '当前顺序' or len(items) <= 1:
+            if reverse:
+                items.reverse()
+            return items
+
         if mode == '文件名':
-            items.sort(key=lambda item: (item.name.lower(), str(item.path).lower()))
+            decorated = [
+                ((item.name.lower(), str(item.path).lower()), item)
+                for item in items
+            ]
         elif mode in {'修改时间', '创建时间'}:
             safe_timestamp = RuleEngine._safe_timestamp
             attr = 'st_mtime' if mode == '修改时间' else 'st_ctime'
-            items.sort(
-                key=lambda item, safe=safe_timestamp, attr_name=attr: (
-                    safe(item, attr_name),
-                    item.name.lower(),
-                    str(item.path).lower(),
-                )
-            )
-        elif mode == '扩展名':
-            items.sort(key=lambda item: (item.ext.lower(), item.path.stem.lower(), str(item.path).lower()))
-        if config.sort_reverse:
-            items.reverse()
-        return items
+            decorated = [
+                ((safe_timestamp(item, attr), item.name.lower(), str(item.path).lower()), item)
+                for item in items
+            ]
+        else:  # 扩展名
+            decorated = [
+                ((item.ext.lower(), item.path.stem.lower(), str(item.path).lower()), item)
+                for item in items
+            ]
+
+        decorated.sort(key=lambda pair: pair[0], reverse=reverse)
+        return [item for _key, item in decorated]
 
     @staticmethod
     def passes_filter(item: FileItem, config: RuleConfig) -> bool:
