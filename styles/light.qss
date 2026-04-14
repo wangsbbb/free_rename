@@ -120,6 +120,29 @@ QLineEdit, QComboBox {
     border-radius: 12px;
     padding: 9px 12px;
     min-height: 20px;
+    color: #111827;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 28px;
+    border: none;
+    background: transparent;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #111827;
+    border: 1px solid #d9e1ea;
+    selection-background-color: rgba(59,130,246,0.16);
+    selection-color: #111827;
+    outline: 0;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 28px;
+    padding: 6px 10px;
+}
+QComboBox QAbstractItemView::item:hover {
+    background: rgba(59,130,246,0.10);
 }
 QTextEdit, QListWidget {
     background: #ffffff;
