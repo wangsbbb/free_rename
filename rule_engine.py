@@ -7,6 +7,8 @@ from typing import Callable, Optional
 
 INVALID_CHARS = set('\\/:*?"<>|')
 MAX_SAFE_PATH_LEN = 240
+
+
 class OperationCancelled(Exception):
     """Raised when a background operation is cancelled by the user."""
 
@@ -44,6 +46,8 @@ class RuleConfig:
     position: str
     separator: str
     keep_ext: bool
+    sort_mode: str
+    sort_reverse: bool
     insert_enabled: bool
     insert_text: str
     insert_mode: str
@@ -89,6 +93,7 @@ class PreviewSummary:
 
 class RuleEngine:
     PREVIEW_PROGRESS_INTERVAL = 200
+    SORT_MODES = ['当前顺序', '文件名', '修改时间', '创建时间', '扩展名']
 
     @staticmethod
     def parse_exts(raw: str) -> set[str]:
@@ -132,6 +137,29 @@ class RuleEngine:
             return None
         flags = re.IGNORECASE if config.regex_ignore_case else 0
         return re.compile(pattern, flags), config.regex_replace
+
+    @staticmethod
+    def _safe_timestamp(item: FileItem, attr: str) -> float:
+        try:
+            return float(getattr(item.path.stat(), attr))
+        except OSError:
+            return float('-inf')
+
+    @staticmethod
+    def sort_files(files: list[FileItem], config: RuleConfig) -> list[FileItem]:
+        items = list(files)
+        mode = config.sort_mode if config.sort_mode in RuleEngine.SORT_MODES else '当前顺序'
+        if mode == '文件名':
+            items.sort(key=lambda item: (item.name.lower(), str(item.path).lower()))
+        elif mode == '修改时间':
+            items.sort(key=lambda item: (RuleEngine._safe_timestamp(item, 'st_mtime'), item.name.lower(), str(item.path).lower()))
+        elif mode == '创建时间':
+            items.sort(key=lambda item: (RuleEngine._safe_timestamp(item, 'st_ctime'), item.name.lower(), str(item.path).lower()))
+        elif mode == '扩展名':
+            items.sort(key=lambda item: (item.ext.lower(), item.path.stem.lower(), str(item.path).lower()))
+        if config.sort_reverse:
+            items.reverse()
+        return items
 
     @staticmethod
     def passes_filter(item: FileItem, config: RuleConfig) -> bool:
@@ -225,10 +253,11 @@ class RuleEngine:
         progress: Optional[Callable[[int, int, str], None]] = None,
     ) -> list[PreviewRow]:
         regex_rule = RuleEngine.get_compiled_regex(config)
+        ordered_files = RuleEngine.sort_files(files, config)
         rows: list[PreviewRow] = []
         seq_index = 0
-        total = len(files)
-        for index, item in enumerate(files, start=1):
+        total = len(ordered_files)
+        for index, item in enumerate(ordered_files, start=1):
             if should_cancel is not None and should_cancel():
                 raise OperationCancelled('预览已取消')
             if not RuleEngine.passes_filter(item, config):

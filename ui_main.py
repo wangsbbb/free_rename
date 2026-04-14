@@ -46,7 +46,7 @@ from rule_engine import FileItem, PreviewRow, PreviewSummary, RuleConfig, RuleEn
 from workers import PreviewWorker, RenameWorker, ScanWorker
 
 APP_NAME = "free_rename"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 APP_TITLE = APP_NAME
 PROJECT_URL = ""
 PREVIEW_DEBOUNCE_MS = 350
@@ -520,6 +520,7 @@ class RenamerWindow(QMainWindow):
     def _history_file_path(self) -> Path:
         return self._app_data_dir() / 'history.log'
 
+
     def _history_timestamp(self) -> str:
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -547,6 +548,7 @@ class RenamerWindow(QMainWindow):
         if refresh:
             self._refresh_history_panel()
 
+
     def _restore_ui_settings(self) -> None:
         theme = self.settings.value("ui/theme", "light", type=str) or "light"
         self.current_theme = theme
@@ -566,6 +568,8 @@ class RenamerWindow(QMainWindow):
         self.position_combo.setCurrentText(self.settings.value("rules/position", "后面", type=str) or "后面")
         self.sep_edit.setText(self.settings.value("rules/separator", "", type=str) or "")
         self.keep_ext_check.setChecked(self.settings.value("rules/keep_ext", True, type=bool))
+        self.sort_mode_combo.setCurrentText(self.settings.value("rules/sort_mode", "当前顺序", type=str) or "当前顺序")
+        self.sort_reverse_check.setChecked(self.settings.value("rules/sort_reverse", False, type=bool))
 
         self.insert_enabled.setChecked(self.settings.value("rules/insert_enabled", False, type=bool))
         self.insert_text_edit.setText(self.settings.value("rules/insert_text", "", type=str) or "")
@@ -623,6 +627,8 @@ class RenamerWindow(QMainWindow):
         self.settings.setValue("rules/position", self.position_combo.currentText())
         self.settings.setValue("rules/separator", self.sep_edit.text())
         self.settings.setValue("rules/keep_ext", self.keep_ext_check.isChecked())
+        self.settings.setValue("rules/sort_mode", self.sort_mode_combo.currentText())
+        self.settings.setValue("rules/sort_reverse", self.sort_reverse_check.isChecked())
 
         self.settings.setValue("rules/insert_enabled", self.insert_enabled.isChecked())
         self.settings.setValue("rules/insert_text", self.insert_text_edit.text())
@@ -656,7 +662,6 @@ class RenamerWindow(QMainWindow):
         self.settings.setValue("ui/current_tab", self.tabs.currentIndex())
         self.settings.setValue("ui/main_splitter_state", self.main_splitter.saveState())
         self.settings.setValue("ui/table_header_state", self.table.horizontalHeader().saveState())
-
     def closeEvent(self, event) -> None:
         if self._execute_thread is not None or self._scan_thread is not None or self._preview_thread is not None:
             QMessageBox.information(self, APP_TITLE, "当前仍有后台任务在运行，可先点击“取消任务”，待任务结束后再关闭窗口。")
@@ -1082,6 +1087,15 @@ class RenamerWindow(QMainWindow):
         grid2.addWidget(self.position_combo, 3, 1)
         grid2.addWidget(self.keep_ext_check, 3, 2)
         outer.addWidget(g2)
+
+        g3, grid3 = self._make_group("排序与编号")
+        self.sort_mode_combo = QComboBox()
+        self.sort_mode_combo.addItems(RuleEngine.SORT_MODES)
+        self.sort_reverse_check = QCheckBox("倒序")
+        grid3.addWidget(QLabel("编号前排序"), 0, 0)
+        grid3.addWidget(self.sort_mode_combo, 1, 0)
+        grid3.addWidget(self.sort_reverse_check, 1, 1)
+        outer.addWidget(g3)
         outer.addStretch(1)
         return w
 
@@ -1294,7 +1308,7 @@ class RenamerWindow(QMainWindow):
     def _watch_fields(self) -> list[QWidget]:
         return [
             self.base_name_edit, self.start_num_edit, self.step_edit, self.digits_combo,
-            self.sep_edit, self.position_combo, self.keep_ext_check, self.insert_enabled,
+            self.sep_edit, self.position_combo, self.keep_ext_check, self.sort_mode_combo, self.sort_reverse_check, self.insert_enabled,
             self.insert_text_edit, self.insert_mode_combo, self.insert_index_edit,
             self.replace_enabled, self.replace_find_edit, self.replace_to_edit,
             self.replace_case_check, self.replace_first_only_check, self.delete_enabled,
@@ -1326,6 +1340,8 @@ class RenamerWindow(QMainWindow):
             position=self.position_combo.currentText().strip(),
             separator=self.sep_edit.text(),
             keep_ext=self.keep_ext_check.isChecked(),
+            sort_mode=self.sort_mode_combo.currentText().strip(),
+            sort_reverse=self.sort_reverse_check.isChecked(),
             insert_enabled=self.insert_enabled.isChecked(),
             insert_text=self.insert_text_edit.text(),
             insert_mode=self.insert_mode_combo.currentText().strip(),
@@ -1438,6 +1454,10 @@ class RenamerWindow(QMainWindow):
         self.rename_mode_radio.setEnabled(not scan_busy and not execute_busy)
         self.copy_mode_radio.setEnabled(not scan_busy and not execute_busy)
         self.continue_on_error_check.setEnabled(not scan_busy and not execute_busy)
+        if hasattr(self, 'move_up_btn'):
+            move_allowed = (self.sort_mode_combo.currentText() == '当前顺序' and not self.sort_reverse_check.isChecked())
+            self.move_up_btn.setEnabled(not any_busy and move_allowed)
+            self.move_down_btn.setEnabled(not any_busy and move_allowed)
 
     def _set_preview_busy(self, busy: bool) -> None:
         _ = busy
@@ -1627,14 +1647,20 @@ class RenamerWindow(QMainWindow):
             self.file_count_label.setText(f"{len(self.files)} 个文件")
 
     def remove_selected(self) -> None:
-        rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
+        selection = self.table.selectionModel().selectedRows()
+        rows = sorted({idx.row() for idx in selection}, reverse=True)
         if not rows:
             return
-        for row in rows:
-            if 0 <= row < len(self.files):
-                del self.files[row]
-        self._add_history(f"移除文件：{len(rows)} 个")
-        self.refresh_preview()
+        selected_paths = {str(self.preview_rows[row].item.path).lower() for row in rows if 0 <= row < len(self.preview_rows)}
+        if not selected_paths:
+            return
+        before = len(self.files)
+        self.files = [item for item in self.files if str(item.path).lower() not in selected_paths]
+        removed = before - len(self.files)
+        if removed <= 0:
+            return
+        self._add_history(f"移除文件：{removed} 个")
+        self.refresh_preview(show_errors=False)
 
     def clear_files(self) -> None:
         self.files.clear()
@@ -1645,17 +1671,30 @@ class RenamerWindow(QMainWindow):
         self.refresh_preview(show_errors=False)
 
     def move_selected(self, delta: int) -> None:
+        if self.sort_mode_combo.currentText() != '当前顺序' or self.sort_reverse_check.isChecked():
+            QMessageBox.information(self, APP_TITLE, '启用排序后编号时，无法直接上移/下移。请先切回“当前顺序”并取消倒序。')
+            return
         rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
         if len(rows) != 1:
-            QMessageBox.information(self, APP_TITLE, "请先选中一行再移动。")
+            QMessageBox.information(self, APP_TITLE, '请先选中一行再移动。')
             return
         row = rows[0]
-        new_row = row + delta
-        if new_row < 0 or new_row >= len(self.files):
+        if not (0 <= row < len(self.preview_rows)):
             return
-        self.files[row], self.files[new_row] = self.files[new_row], self.files[row]
+        selected_key = str(self.preview_rows[row].item.path).lower()
+        real_index = next((idx for idx, item in enumerate(self.files) if str(item.path).lower() == selected_key), -1)
+        if real_index < 0:
+            return
+        new_index = real_index + delta
+        if new_index < 0 or new_index >= len(self.files):
+            return
+        self.files[real_index], self.files[new_index] = self.files[new_index], self.files[real_index]
         self.refresh_preview(show_errors=False)
-        self.table.selectRow(new_row)
+        new_key = str(self.files[new_index].path).lower()
+        for preview_index, preview_row in enumerate(self.preview_rows):
+            if str(preview_row.item.path).lower() == new_key:
+                self.table.selectRow(preview_index)
+                break
 
     def _render_preview(self) -> None:
         self.preview_model.update_data(self.preview_rows, self.preview_target_map)
@@ -1673,7 +1712,7 @@ class RenamerWindow(QMainWindow):
             f"跳过：{self.preview_summary.skip}\n"
             f"重名冲突：{self.preview_summary.duplicate}\n"
             f"错误：{self.preview_summary.error}\n\n"
-            "当前版本进一步优化了预览进度反馈、历史页检索和大列表列宽布局。"
+            "当前版本支持排序后再编号。"
         )
         self._update_interaction_state()
 
